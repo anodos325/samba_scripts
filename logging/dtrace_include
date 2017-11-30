@@ -1,0 +1,28 @@
+; Dtrace Logging Samba Include.
+; The purposes of this include is to selectively enable
+; Dtrace scripts to run when specific clients negotiate an SMB session
+; and quit when the SMB session ends. This is done through preexec 
+; and postexec scripts. Enabling them is a multi-step process:
+; 1) make a directory for dtrace scripts. - only writable by "root"
+; 2) copy this include file to an appropriate ex: /var/log/samba4/
+; 3) add an include in the samba share's aux parameters
+;    ex: include = /var/log/dtrace_includes-%a 
+;        include = /var/log/dtrace_includes-%I
+; 4) modify this include file to set appropriate log directories
+;    and enable preexec scripts as desired.
+; 5) symlink this file in a way that it gets picked up by the SMB client
+;    ex: ln -s /var/log/dtrace_incudes /var/log/dtrace_includes-OSX
+;              (profile OSX clients)
+;    ex: ln -s /var/log/dtrace_incudes /var/log/dtrace_includes-192.168.42.42
+; %d = smbd PID, %a = architecture, %I = IP of SMB client
+
+; postexec
+; ---------------------------------------------------------------------
+; kill all dtrace scripts profiling the pid of the smbd process
+; this is a generic catch-all.
+root postexec = /bin/pkill -f %d
+
+; preexec
+; ---------------------------------------------------------------------
+; pid histogram
+root preexec = /bin/bash -c '/var/log/dtrace/dt_pidhist.dtrace %d > /var/log/dtrace/output/%I_%dt_pidHist 2>&1 &'
