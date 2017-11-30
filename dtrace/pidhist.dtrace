@@ -1,0 +1,4 @@
+#!/usr/sbin/dtrace -s 
+
+pid$1:::entry 
+{ @hist[probefunc,probemod] = count ();} 
