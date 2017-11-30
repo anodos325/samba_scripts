@@ -25,4 +25,4 @@ root postexec = /bin/pkill -f %d
 ; preexec
 ; ---------------------------------------------------------------------
 ; pid histogram
-root preexec = /bin/bash -c '/var/log/dtrace/dt_pidhist.dtrace %d > /var/log/dtrace/output/%I_%dt_pidHist 2>&1 &'
+root preexec = /bin/bash -c '/var/log/dtrace/dt_pidhist.dtrace %d > /var/log/dtrace/output/%I_%d_pidHist 2>&1 &'
