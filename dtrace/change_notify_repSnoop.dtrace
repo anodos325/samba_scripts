@@ -1,0 +1,7 @@
+#!/usr/sbin/dtrace -s 
+
+pid$1::change_notify_reply:entry 
+	{
+	printf ( " %Y", (walltimestamp )) ;
+	@[ustack()] = count();
+	}
