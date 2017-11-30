@@ -1,0 +1,13 @@
+; log file path is FreeBSD-specific
+; enabling / disabling on a per client basis requires roughly the following
+; 1 - create file with the below params - /var/log/samba4/client-debug-include
+; 2 - add the following to [global] in smb4.conf "include = /var/log/samba4/client-debug-include-%I
+; 3 - ln -s /var/log/samba4/client-debug-include /var/log/samba4/client-debug-include-<ip of client>
+
+max log size = 0
+log file = /var/log/samba4/log-client.%I_%d
+log level = 10
+debug pid = yes
+debug uid = yes
+debug class = yes
+debug hires timestamp = yes
