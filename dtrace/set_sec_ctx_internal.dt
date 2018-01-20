@@ -1,0 +1,8 @@
+#!/usr/sbin/dtrace -s
+
+::set_sec_ctx_internal:entry
+{
+        self->sec_uid = arg0;
+        self->sec_gid = arg1;
+        printf("uid=%d  gid=%d", self->sec_uid, self->sec_gid);
+}
