@@ -1,0 +1,13 @@
+#!/usr/sbin/dtrace -qs
+
+syscall::listen:entry
+{
+        self->backlog = arg1;
+}
+
+syscall::listen:return
+/errno/
+{
+        trace(execname);
+        printf("errno=%d listen_backlog_val=%d at time %Y", errno, self->backlog, (walltimestamp));
+}
