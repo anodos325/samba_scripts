@@ -1,0 +1,6 @@
+#!/usr/sbin/dtrace -s
+syscall:::return
+/execname=="smbd" && errno==55/
+{
+@[ustack(),probefunc] = count();
+}
