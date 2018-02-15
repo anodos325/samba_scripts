@@ -13,7 +13,7 @@ owner="root"
 group="wheel"
 
 
-i=1
+file_iteration=1
 dir_iteration=1
 mkdir -p $target_dir
 
@@ -21,17 +21,17 @@ while [ $dir_iteration -le $target_num_dirs ]
 do
 rnd_dir=$(mktemp -d "$target_dir"/smbtestdir.XXXXX)
 echo "$rnd_dir"
-        while [ $i -le $target_num_files ]
+        while [ $file_iteration -le $target_num_files ]
         do
             rnd_file=$(mktemp "$rnd_dir"/smbtest.XXXXXXXX)
             dd_count=$(jot -r 1 $min_count $max_count)
             dd if=/dev/random of=$rnd_file count=$dd_count bs=$dd_bs status=none
             dd if=/dev/random count=$dd_count bs=$dd_bs status=none | \
                 setextattr -in "user" "$stream_name" $rnd_file 
-            i=$(($i + 1))
+            file_iteration=$(($file_iteration + 1))
         done
 dir_iteration=$(($dir_iteration + 1))
-i=1
+file_iteration=1
 done
 
 echo "setting default permissions on $target_dir"
