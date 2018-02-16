@@ -10,6 +10,7 @@ min_count=1  #minimum value for blocks in dd
 max_count=5  #maximum value for blocks in dd
 dd_bs=16384  #16KB
 stream_name='DosStream.Afp_Resource:$DATA'
+dosattrib_b64='CTB4MTAAAAMAAwAAABEAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABimX3sSqfTAQAAAAAAAAAACg=='
 owner="root"
 group="wheel"
 
@@ -29,7 +30,9 @@ echo "$rnd_dir"
                 openssl enc -aes-256-ecb -k abcd123456 | dd of=$rnd_file
             dd if=/dev/zero count=$dd_count bs=$dd_bs status=none | \
                 openssl enc -aes-256-ecb -k abcd123456 | \
-                setextattr -in "user" "$stream_name" $rnd_file 
+                setextattr -in "user" "$stream_name" $rnd_file
+            echo "$dosattrib_b64" | b64decode -r | \ 
+                setextattr -i "user" "DOSATTRIB" $rnd_file
             file_iteration=$(($file_iteration + 1))
         done
 dir_iteration=$(($dir_iteration + 1))
