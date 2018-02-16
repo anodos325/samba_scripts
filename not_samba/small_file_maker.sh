@@ -1,17 +1,17 @@
 #!/bin/sh
 
 # Script to create lots of small files with xattrs for samba testing
+# Depends on openssl and winacl
 
 target_num_files=10
 target_num_dirs=10
-target_dir="/mnt/tank/smb_small_files2"
+target_dir="/mnt/dozer/smb_small_files2"
 min_count=1  #minimum value for blocks in dd
 max_count=5  #maximum value for blocks in dd
 dd_bs=16384  #16KB
 stream_name='DosStream.Afp_Resource:$DATA'
 owner="root"
 group="wheel"
-
 
 file_iteration=1
 dir_iteration=1
@@ -25,8 +25,10 @@ echo "$rnd_dir"
         do
             rnd_file=$(mktemp "$rnd_dir"/smbtest.XXXXXXXX)
             dd_count=$(jot -r 1 $min_count $max_count)
-            dd if=/dev/random of=$rnd_file count=$dd_count bs=$dd_bs status=none
-            dd if=/dev/random count=$dd_count bs=$dd_bs status=none | \
+            dd if=/dev/zero count=$dd_count bs=$dd_bs status=none | \
+                openssl enc -aes-256-ecb -k abcd123456 | dd of=$rnd_file
+            dd if=/dev/zero count=$dd_count bs=$dd_bs status=none | \
+                openssl enc -aes-256-ecb -k abcd123456 | \
                 setextattr -in "user" "$stream_name" $rnd_file 
             file_iteration=$(($file_iteration + 1))
         done
