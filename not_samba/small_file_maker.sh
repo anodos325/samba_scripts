@@ -6,9 +6,9 @@
 target_num_files=100
 target_num_dirs=1
 target_dir="/mnt/flashyflashflash/SSD_SHARE/smb_small_files2"
-min_count=200  #minimum value for blocks in dd
-max_count=700  #maximum value for blocks in dd
-dd_bs=16384  #16KB
+min_count=200  #minimum value for blocks
+max_count=700  #maximum value for blocks
+bs=16384  #16KB
 stream_name='DosStream.Afp_Resource:$DATA'
 dosattrib_b64="MHgxMAAAAwADAAAAEQAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGKZfexKp9MBAAAAAAAAAAAK=="
 owner="root"
@@ -25,9 +25,10 @@ echo "$rnd_dir"
         while [ $file_iteration -le $target_num_files ]
         do
             rnd_file=$(mktemp "$rnd_dir"/smbtest.XXXXXXXX)
-            dd_count=$(jot -r 1 $min_count $max_count)
-            dd if=/dev/random count=$dd_count bs=$dd_bs of=$rnd_file status=none
-            dd if=/dev/random count=$dd_count bs=$dd_bs status=none | \
+            block_count=$(jot -r 1 $min_count $max_count)
+            file_size=$(($block_count*$bs))
+            openssl rand -out $rnd_file $file_size
+            dd if=/dev/random count=1 bs=$bs status=none | \
                 setextattr -in "user" "$stream_name" $rnd_file
             echo -n "$dosattrib_b64" | b64decode -r | \
                 setextattr -i "user" "DOSATTRIB" $rnd_file
