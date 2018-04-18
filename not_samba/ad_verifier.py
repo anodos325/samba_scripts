@@ -219,5 +219,13 @@ def main():
     for server in global_catalog_servers:
        get_server_status(str(server.target), server.port, "Global Catalog")
 
+    print("DEBUG: Verifying server entries in IPv4 reverse lookup zone")
+    for address in config_ipv4_addresses:
+       try:
+          host_name = socket.gethostbyaddr(address)
+          print("   SUCCESS - %s resolved to %s" % (address, host_name))
+       except:
+          print("   FAIL - hostname lookup for address %s unsuccessful" % (address))
+
 if __name__ == '__main__':
     main()
