@@ -16,22 +16,17 @@ import sqlite3
 import dns.resolver
 
 def get_domain_controllers(ad_domain):
-    ad_domain_controllers = []
     answers = dns.resolver.query('_ldap._tcp.dc._msdcs.' + ad_domain, 'SRV')
     for rdata in answers:
-       formatted_rdata= str(rdata).split()[3]
-       ad_domain_controllers.append(formatted_rdata)
+       # If DC doesn't support ldaps, then we should throw error
+       rdata.port = 636
 
-    return ad_domain_controllers
+    return answers
 
 def get_kerberos_servers(ad_domain):
-    kerberos_servers = []
     answers = dns.resolver.query('_kerberos._tcp.' + ad_domain, 'SRV')
-    for rdata in answers:
-       formatted_rdata= str(rdata).split()[3]
-       kerberos_servers.append(formatted_rdata)
 
-    return kerberos_servers
+    return answers 
 
 def get_name_servers(ad_domain):
     name_servers = []
@@ -43,54 +38,50 @@ def get_name_servers(ad_domain):
     return name_servers 
     
 def get_kerberos_domain_controllers(ad_domain):
-    kerberos_domain_controllers = []
     answers = dns.resolver.query('_kerberos._tcp.dc._msdcs.' + ad_domain, 'SRV')
-    for rdata in answers:
-       formatted_rdata= str(rdata).split()[3]
-       kerberos_domain_controllers.append(formatted_rdata)
 
-    return kerberos_domain_controllers
+    return answers 
 
 def get_kpasswd_servers(ad_domain):
-    kpasswd_servers = []
     answers = dns.resolver.query('_kpasswd._tcp.' + ad_domain, 'SRV')
-    for rdata in answers:
-       formatted_rdata= str(rdata).split()[3]
-       kpasswd_servers.append(formatted_rdata)
 
-    return kpasswd_servers
+    return answers 
 
 def get_global_catalog_servers(ad_domain):
-    global_catalog_servers = []
     answers = dns.resolver.query('_gc._tcp.' + ad_domain, 'SRV')
     for rdata in answers:
-       formatted_rdata= str(rdata).split()[3]
-       global_catalog_servers.append(formatted_rdata)
+       rdata.port = 3269 
 
-    return global_catalog_servers
+    return answers 
 
 def get_ldap_servers(ad_domain):
-    ldap_servers = []
     answers = dns.resolver.query('_ldap._tcp.' + ad_domain, 'SRV')
     for rdata in answers:
-       formatted_rdata= str(rdata).split()[3]
-       ldap_servers.append(formatted_rdata)
+       rdata.port = 636
 
-    return ldap_servers
+    return answers 
 
 def service_is_listening(host, port):
     ret = False
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # If it takes more than 10 seconds to connect, then we have some issues.
+    s.settimeout(10.0)
     try:
         s.connect((host, port))
         ret = True
 
-    except Exception as e:
-        errors.append(e)
+    except:
         ret = False
 
     s.close()
     return ret
+
+def get_server_status(host, port, server_type):
+    if service_is_listening(host, port):
+       print("DEBUG: open socket to %s Server %s reports - SUCCESS" % (server_type, host))
+    else:
+       print("DEBUG: open socket to %s Server %s reports - FAIL" % (server_type, host))
+
 
 def validate_time(ntp_server):
     # to do: should use UTC instead of local time. On other hand,
@@ -114,10 +105,6 @@ def validate_time(ntp_server):
     return clockskew
 
 def main():
-    ad_domain_controllers = []
-    dns_servers = []
-    kerberos_domain_controllers = []
-    global_catalog_servers = []
 
     #####################################
     # Grab information from Config File #
@@ -201,8 +188,8 @@ def main():
     ## Compare clock skew between system time and DC time ##
     ad_permitted_clockskew = datetime.timedelta(minutes=1)
     for ad_domain_controller in ad_domain_controllers:
-       ad_clockskew = validate_time(ad_domain_controller)
-       print("AD_NTP_SERVERS: %s clockskew is: %s" % (ad_domain_controller,ad_clockskew))
+       ad_clockskew = validate_time(str(ad_domain_controller.target))
+       print("AD_NTP_SERVERS: %s clockskew is: %s" % (ad_domain_controller.target,ad_clockskew))
        try: 
            if ad_clockskew > ad_permitted_clockskew:
                print("   WARNING: clock skew between AD DC and system time is greater than 1 minute")
@@ -214,41 +201,23 @@ def main():
     #############################
 
     # Verify that we can open sockets to the various AD components
-    for name_server in name_servers:
-       if service_is_listening(name_server, 53):
-          print("DEBUG: open socket to name server %s reports - SUCCESS" % (name_server))
-       else:
-          print("DEBUG: open socket to name server %s reports - FAIL" % (name_server))
+    for server in name_servers:
+       get_server_status(server, 53, "Name")
 
-    for domain_controller in ad_domain_controllers:
-       if service_is_listening(domain_controller, 389):
-          print("DEBUG: open socket to AD/DC %s reports - SUCCESS" % (domain_controller))
-       else:
-          print("DEBUG: open socket to AD/DC %s reports - FAIL" % (domain_controller))
+    for server in ad_domain_controllers:
+       get_server_status(str(server.target), server.port, "AD/DC")
 
     for server in ldap_servers:
-       if service_is_listening(server, 389):
-          print("DEBUG: open socket to LDAP Server %s reports - SUCCESS" % (server))
-       else:
-          print("DEBUG: open socket to LDAP Server %s reports - FAIL" % (server))
+       get_server_status(str(server.target), server.port, "LDAPS")
 
     for server in kerberos_servers:
-       if service_is_listening(server, 88):
-          print("DEBUG: open socket to Kerberos Server %s reports - SUCCESS" % (server))
-       else:
-          print("DEBUG: open socket to Kerberos Server %s reports - FAIL" % (server))
+       get_server_status(str(server.target), server.port, "Kerberos")
 
     for server in kerberos_domain_controllers:
-       if service_is_listening(server, 88):
-          print("DEBUG: open socket to KDC %s reports - SUCCESS" % (server))
-       else:
-          print("DEBUG: open socket to KDC %s reports - FAIL" % (server))
+       get_server_status(str(server.target), server.port, "KDC")
 
     for server in global_catalog_servers:
-       if service_is_listening(server, 3269):
-          print("DEBUG: open socket to Global Catalog Server %s reports - SUCCESS" % (server))
-       else:
-          print("DEBUG: open socket to Global Catalog Server %s reports - FAIL" % (server))
+       get_server_status(str(server.target), server.port, "Global Catalog")
 
 if __name__ == '__main__':
     main()
