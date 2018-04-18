@@ -109,6 +109,7 @@ def main():
     #####################################
     # Grab information from Config File #
     #####################################
+    server_names = []
     FREENAS_DB = '/data/freenas-v1.db'
     conn = sqlite3.connect(FREENAS_DB)
     conn.row_factory = lambda cursor, row: row[0]
@@ -118,6 +119,10 @@ def main():
     c.execute('SELECT ntp_address FROM system_ntpserver')
     config_ntp_servers = c.fetchall()
 
+    # Get IP Addresses for NICs
+    c.execute('SELECT int_ipv4address FROM network_interfaces')
+    config_ipv4_addresses = c.fetchall()
+
     # Get AD domain name
     c.execute('SELECT ad_domainname FROM directoryservice_activedirectory')
     ad_domainname = c.fetchone()
@@ -125,6 +130,23 @@ def main():
     # Get Global Configuration Domain Network
     c.execute('SELECT gc_domain FROM network_globalconfiguration')
     gc_domain = c.fetchone()
+
+    c.execute('SELECT gc_hostname FROM network_globalconfiguration')
+    gc_hostname = c.fetchone()
+
+    c.execute('SELECT gc_hostname_b FROM network_globalconfiguration')
+    gc_hostname_b = c.fetchone()
+
+    c.execute('SELECT gc_hostname_virtual FROM network_globalconfiguration')
+    gc_hostname_virtual = c.fetchone()
+    
+    server_names.append(gc_hostname + "." + ad_domainname)
+
+    if (gc_hostname_b) and (gc_hostname_b != "truenas-b"):
+       server_names.append(gc_hostname_b + "." + "ad_domainname")
+
+    if (gc_hostname_virtual):
+       server_names.append(gc_hostname_virtual + "." + "ad_domainname")
 
     # Get config DNS servers
     c.execute('SELECT gc_nameserver1 FROM network_globalconfiguration')
@@ -218,6 +240,17 @@ def main():
 
     for server in global_catalog_servers:
        get_server_status(str(server.target), server.port, "Global Catalog")
+
+    print("DEBUG: Verifying server entries in IPv4 forward lookup zone")
+    my_resolver = dns.resolver.Resolver()
+    my_resolver.nameservers = name_server_ips 
+    for server_name in server_names: 
+      try:
+          forward_lookup = my_resolver.query(server_name)
+          server_address = str(forward_lookup.rrset).split()[4]
+          print("   SUCCESS - %s resolved to %s" % (server_name, server_address)) 
+      except:
+          print("   FAIL - address lookup for name %s unsuccessful" % (gc_hostname + "." + gc_domain))
 
     print("DEBUG: Verifying server entries in IPv4 reverse lookup zone")
     for address in config_ipv4_addresses:
