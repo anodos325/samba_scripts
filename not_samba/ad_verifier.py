@@ -276,7 +276,7 @@ def main():
           server_address = str(forward_lookup.rrset).split()[4]
           print("   SUCCESS - %s resolved to %s" % (server_name, server_address)) 
       except:
-          print("   FAIL - address lookup for name %s unsuccessful" % (gc_hostname + "." + gc_domain))
+          print("   FAIL - address lookup for name %s unsuccessful" % (server_name))
 
     print("DEBUG: Verifying server entries in IPv4 reverse lookup zone")
     for address in config_ipv4_addresses:
