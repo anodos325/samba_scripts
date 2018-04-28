@@ -106,7 +106,7 @@ def validate_time(ntp_server):
     return clockskew
 
 def generate_awesome_header_of_awesomeness():
-    print (textwrap.dedent("""\
+    print (textwrap.dedent('\x1b[5;31;40m' + """\
                 ,.                                                          .s.     
             ,d$$$$b.     ,s$$$$$$$$s.                  ,s$$$$$$$$s.        ,d$$$b.   
         ,d$$$$$$$$b.  4$$$$$$$$$$$$$b        ssssss 4$$$$$$$$$$$$$b.   ,d$$$$$$$$b. 
@@ -127,7 +127,7 @@ def generate_awesome_header_of_awesomeness():
         ################################################################################
         ############################### HIGHWAY TO SHELL ###############################
         ################################################################################
-        """))
+        """ + '\x1b[0m'))
 
 def main():
     if (len(sys.argv) > 1) and (sys.argv[1] == "party_mode"):
@@ -136,6 +136,7 @@ def main():
     # Grab information from Config File #
     #####################################
     server_names = []
+    bind_ips = []
     FREENAS_DB = '/data/freenas-v1.db'
     conn = sqlite3.connect(FREENAS_DB)
     conn.row_factory = lambda cursor, row: row[0]
@@ -149,6 +150,14 @@ def main():
     c.execute('SELECT int_ipv4address FROM network_interfaces')
     config_ipv4_addresses = c.fetchall()
 
+    c.execute('SELECT cifs_srv_bindip FROM services_cifs')
+    cifs_srv_bind_ip = c.fetchone()
+
+    if (cifs_srv_bind_ip):
+       bind_ips = str(cifs_srv_bind_ip).split(",")
+    else:
+       bind_ips.append(config_ipv4_addresses)
+    
     # Get AD domain name
     c.execute('SELECT ad_domainname FROM directoryservice_activedirectory')
     ad_domainname = c.fetchone()
@@ -279,7 +288,7 @@ def main():
           print("   FAIL - address lookup for name %s unsuccessful" % (server_name))
 
     print("DEBUG: Verifying server entries in IPv4 reverse lookup zone")
-    for address in config_ipv4_addresses:
+    for address in bind_ips:
        try:
           host_name = socket.gethostbyaddr(address)
           print("   SUCCESS - %s resolved to %s" % (address, host_name))
