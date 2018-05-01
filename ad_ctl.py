@@ -49,14 +49,18 @@ from freenasUI.common.freenassysctl import freenas_sysctl as fs
 
 log = logging.getLogger('ad_ctl')
 
-def validate_hosts(client):
+def validate_hosts(cifs_config):
     hosts = open('/etc/hosts','r')
-    cifs = Struct(client.call('datastore.query', 'services.cifs', None, {'get': True}))
     for line in hosts:
-        if str(cifs.cifs_srv_netbiosname) in str(line):
+        if str(cifs_config.cifs_srv_netbiosname) in str(line):
             return True
 
     return False
+
+def validate_klist(krb_config):
+    p = pipeopen("/usr/bin/klist")
+    output = p.communicate()
+    print(output)
 
 def service_launcher(service, command):
     p = pipeopen("/usr/sbin/service %s %s" % (service, command))
@@ -70,9 +74,31 @@ def service_launcher(service, command):
 
 def main():
     client = Client()
-    if not validate_hosts(client):
+    cifs_config = Struct(client.call('datastore.query', 'services.cifs', None, {'get': True}))
+    krb_config = Struct(client.call('datastore.query', 'services.cifs', None, {'get': True}))
+
+    if not validate_hosts(cifs_config):
         print("restarting ix-hostname service")
         service_launcher("ix-hostname", "quietstart")
+    
+   # validate_klist("krb_config.krb_realm")
 
+    service_launcher("ix-kerberos", "quietstart")
+
+    service_launcher("ix-nsswitch", "quietstart")
+
+    if not service_launcher("ix-kinit", "status"):
+        if not service_launcher("ix-kinit", "quietstart"):
+             print("ix-kinit failed")
+
+    service_launcher("ix-pre-samba", "quietstart")
+
+    service_launcher("ix-activedirectory", "quietstart")
+
+    service_launcher("samba_server", "restart")
+
+    service_launcher("ix-pam", "quietstart")
+    service_launcher("ix-cache", "quietstart")
+    
 if __name__ == '__main__':
     main()
