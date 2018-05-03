@@ -178,10 +178,10 @@ def main():
     server_names.append(gc_hostname + "." + ad_domainname)
 
     if (gc_hostname_b) and (gc_hostname_b != "truenas-b"):
-       server_names.append(gc_hostname_b + "." + "ad_domainname")
+       server_names.append(gc_hostname_b + "." + ad_domainname)
 
     if (gc_hostname_virtual):
-       server_names.append(gc_hostname_virtual + "." + "ad_domainname")
+       server_names.append(gc_hostname_virtual + "." + ad_domainname)
 
     # Get config DNS servers
     c.execute('SELECT gc_nameserver1 FROM network_globalconfiguration')
@@ -291,7 +291,7 @@ def main():
     for address in bind_ips:
        try:
           host_name = socket.gethostbyaddr(address)
-          print("   SUCCESS - %s resolved to %s" % (address, host_name))
+          print("   SUCCESS - %s resolved to %s" % (address, host_name[0]))
        except:
           print("   FAIL - hostname lookup for address %s unsuccessful" % (address))
 
