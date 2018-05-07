@@ -120,6 +120,7 @@ def convert_id_to_lists(id_out):
     for group in sup_group_list:
         group_data = []
         norm_sup_group = group.split('(')
+        print(norm_sup_group)
         sup_group_sid = xid_to_sid("gid",norm_sup_group[0])
         group_data.append(norm_sup_group[0])
         group_data.append(norm_sup_group[1])
@@ -140,6 +141,26 @@ def validate_xid_ranges(samba_config, id_lists):
     else:
        print("danger will robinson")
        return False
+
+    
+
+    # validate the UID #
+    if not (low_range <= int(id_lists[0][0]) <= high_range):
+        return False
+ 
+    # validate the primary GID #
+    if not (low_range <= int(id_lists[1][0]) <= high_range):
+        return False
+ 
+    # validate the supplementary groups
+    for i in id_lists[2]:
+        domain_split = i[1].split('\\')
+        print(domain_split)
+        if domain_split[0] == "BUILTIN":
+            continue 
+
+        if not (low_range <= int(i[0]) <= high_range):
+            return False
 
     return True
        
@@ -162,7 +183,9 @@ def main():
         return False
 
     id_lists = convert_id_to_lists(id_output)
-    validate_xid_ranges(samba_config, id_lists)
+    if not validate_xid_ranges(samba_config, id_lists):
+        print("Failed to validate idmap ranges")
+        return False
     
     print(id_lists)
 
