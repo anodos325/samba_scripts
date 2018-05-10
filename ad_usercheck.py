@@ -50,6 +50,9 @@ from freenasUI.common.freenassysctl import freenas_sysctl as fs
 def get_id_output(username):
     p = subprocess.Popen(["/usr/bin/id", username], stdout=subprocess.PIPE)
     output = p.communicate()
+    if p.returncode !=0:
+        print(output[0])
+        return False
 
     return output
 
@@ -229,11 +232,14 @@ def main():
     # By default check data on administrator account. This *should* exist in ad environment
     # optionally override by passing and argument to the script
     username = "%s\Administrator" % samba_config[1].ad_domainname
+
+    if (len(sys.argv) > 1):
+        username = sys.argv[1]
+    
     id_output = get_id_output(username)
 
     # If we return something in stderr, exit and print error
-    if id_output[1]:
-        print(id_output)
+    if not id_output:
         return False
 
     id_lists = convert_id_to_lists(id_output)
@@ -249,8 +255,15 @@ def main():
     else:
         print("Validate SIDs: SUCCESS")
     
-    print(id_lists)
-
+    col_width = max(len(word) for row in id_lists[2] for word in row) + 2 # padding 
+    header = ['XID', 'NAME', 'SID']
+    print("Dumping ID information for user %s" % username)
+    print("UID: %s     Name: %s     SID: %s" % (id_lists[0][0],id_lists[0][1],id_lists[0][2]))
+    print("Primary Group")
+    print("GID: %s     Name: %s     SID: %s" % (id_lists[1][0],id_lists[1][1],id_lists[1][2]))
+    print("Supplementary Groups")
+    for i in id_lists[2]:
+        print("GID: %s     Name: %s    SID: %s" % (i[0], i[1], i[2]))
 
 if __name__ == '__main__':
     main()
