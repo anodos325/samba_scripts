@@ -1,8 +1,5 @@
 #!/usr/local/bin/python
 
-from middlewared.client import Client
-from middlewared.client.utils import Struct
-
 import os
 import pwd
 import re
@@ -13,257 +10,264 @@ import tempfile
 import time
 import logging
 import logging.config
+import ntplib
+import datetime
+import sqlite3
+import dns.resolver
+import textwrap
 
-sys.path.extend([
-    '/usr/local/www',
-    '/usr/local/www/freenasUI'
-])
+def get_domain_controllers(ad_domain):
+    answers = dns.resolver.query('_ldap._tcp.dc._msdcs.' + ad_domain, 'SRV')
+    for rdata in answers:
+       # If DC doesn't support ldaps, then we should throw error
+       rdata.port = 636
 
-logging.config.dictConfig({
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'simple': {
-            'format': '[%(name)s:%(lineno)s] %(message)s'
-        },
-    },
-    'handlers': {
-        'syslog': {
-            'level': 'DEBUG',
-            'class': 'logging.handlers.SysLogHandler',
-            'formatter': 'simple',
-        }
-    },
-    'loggers': {
-        '': {
-            'handlers': ['syslog'],
-            'level': 'DEBUG',
-            'propagate': True,
-        },
-    }
-})
+    return answers
 
-from freenasUI.common.pipesubr import pipeopen
-from freenasUI.common.log import log_traceback
-from freenasUI.common.freenassysctl import freenas_sysctl as fs 
+def get_kerberos_servers(ad_domain):
+    answers = dns.resolver.query('_kerberos._tcp.' + ad_domain, 'SRV')
 
-def get_id_output(username):
-    p = subprocess.Popen(["/usr/bin/id", username], stdout=subprocess.PIPE)
-    output = p.communicate()
-    if p.returncode !=0:
-        print(output[0])
-        return False
+    return answers 
 
-    return output
+def get_name_servers(ad_domain):
+    name_servers = []
+    answers = dns.resolver.query(ad_domain, 'NS')
+    for rdata in answers:
+       formatted_rdata= str(rdata)
+       name_servers.append(formatted_rdata)
 
-def xid_to_sid(xid_type, xid):
-    if xid_type is "uid":
-        p = pipeopen("/usr/local/bin/wbinfo -U %s" % xid)
-    else:
-        p = pipeopen("/usr/local/bin/wbinfo -G %s" % (xid))
+    return name_servers 
+    
+def get_kerberos_domain_controllers(ad_domain):
+    answers = dns.resolver.query('_kerberos._tcp.dc._msdcs.' + ad_domain, 'SRV')
 
-    output = p.communicate()
-    return output[0].rstrip()
+    return answers 
 
-############################################################################
-# Retrieve a de-facto smb.conf via middleware calls. This will also set    #
-# correct idmap backends for the AD domain and BUILTIN domain.             #
-############################################################################
+def get_kpasswd_servers(ad_domain):
+    answers = dns.resolver.query('_kpasswd._tcp.' + ad_domain, 'SRV')
 
-def get_samba_config_data(client):
-    samba_config = []
-    cifs_config = Struct(client.call('datastore.query', 'services.cifs', None, {'get': True}))
-    ad_config = Struct(client.call('datastore.query', 'directoryservice.activedirectory', None, {'get': True}))
-    default_idmap_config = Struct(client.call('datastore.query', 'directoryservice.idmap_tdb', None, {'get': True}))
+    return answers 
 
-    idmap_backend_call = "directoryservice.idmap_%s" % ad_config.ad_idmap_backend
+def get_global_catalog_servers(ad_domain):
+    answers = dns.resolver.query('_gc._tcp.' + ad_domain, 'SRV')
+    for rdata in answers:
+       rdata.port = 3269 
 
+    return answers 
+
+def get_ldap_servers(ad_domain):
+    answers = dns.resolver.query('_ldap._tcp.' + ad_domain, 'SRV')
+    for rdata in answers:
+       rdata.port = 636
+
+    return answers 
+
+def service_is_listening(host, port):
+    ret = False
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # If it takes more than 10 seconds to connect, then we have some issues.
+    s.settimeout(10.0)
     try:
-        idmap_config = Struct(client.call('datastore.query', idmap_backend_call, None, {'get': True}))
+        s.connect((host, port))
+        ret = True
+
     except:
-        print("failed to get idmap data via middleware calls")
-        return False
+        ret = False
 
-    for item in [cifs_config, ad_config, idmap_config, default_idmap_config]:
-        samba_config.append(item) 
+    s.close()
+    return ret
 
-    return samba_config
-
-############################################################################
-# Retrieve domain SID for a given domain via wbinfo --domain-info.         #
-# Opted not to use 'net getdomainsid                                       #
-############################################################################
-
-def get_domain_sid(domain):
-    p = pipeopen("/usr/local/bin/wbinfo --domain-info=%s" % domain)
-
-    output = p.communicate()
-    split_output = output[0].splitlines()
-    domain_sid = split_output[2].split(': ')
-    return domain_sid[1]
-
-############################################################################
-# Generate list of three lists: user, primary group, supplementary groups. #
-# Supplemntary group list contains lists containing xid data (formatted    #
-# same as "user" and "primary group". Each xid data list contains three    #
-# members: xid, name, sid                                                  #
-############################################################################
-
-def convert_id_to_lists(id_out):
-    output_list = []
-    user = []
-    pri_group = []
-    supp_groups = []
-    
-     
-    split_output = id_out[0].decode('utf-8').rstrip().split(') ')
-
-    # Generate list of data for 'User' 
-    norm_uid_data = split_output[0].strip('uid=').split('(')
-    uid_to_sid = xid_to_sid("uid",norm_uid_data[0]) 
-
-    for item in [norm_uid_data[0], norm_uid_data[1], uid_to_sid]:
-        user.append(item)
-
-    output_list.append(user)
-
-    # ditto for primary group
-    norm_pri_gid_data = split_output[1].strip('gid=').split('(')
-    pri_gid_to_sid = xid_to_sid("gid",norm_pri_gid_data[0]) 
-
-    for item in [norm_pri_gid_data[0], norm_pri_gid_data[1], uid_to_sid]:
-        pri_group.append(item)
-
-    output_list.append(pri_group)
-
-    # ditto for supplementary groups
-    sup_group_list = split_output[2].strip('groups=').split('),')
-    for group in sup_group_list:
-        group_data = []
-        norm_sup_group = group.split('(')
-        sup_group_sid = xid_to_sid("gid",norm_sup_group[0])
-        
-        for item in [norm_sup_group[0], norm_sup_group[1], sup_group_sid]:
-            group_data.append(item)
-
-        supp_groups.append(group_data)
-
-    output_list.append(supp_groups)
-         
-    return output_list
-
-############################################################################
-# Verify that each user / group in 'id' output lies within the idmap range #
-# that has been set for the domain in question                             #
-############################################################################
-
-def validate_xid_ranges(samba_config, id_lists):
-
-    if samba_config[1].ad_idmap_backend == 'autorid':
-       high_range = samba_config[2].idmap_autorid_range_high
-       low_range = samba_config[2].idmap_autorid_range_low
-    elif samba_config[1].ad_idmap_backend == "rid":
-       high_range = samba_config[2].idmap_rid_range_high
-       low_range = samba_config[2].idmap_rid_range_low
-    elif samba_config[1].ad_idmap_backend == "ad":
-       high_range = samba_config[2].idmap_ad_range_high
-       low_range = samba_config[2].idmap_ad_range_low
+def get_server_status(host, port, server_type):
+    if service_is_listening(host, port):
+       print("DEBUG: open socket to %s Server %s reports - SUCCESS" % (server_type, host))
     else:
-       print("danger will robinson")
-       return False
+       print("DEBUG: open socket to %s Server %s reports - FAIL" % (server_type, host))
 
-    if samba_config[1].ad_idmap_backend != 'autorid':
-        default_high_range = samba_config[3].idmap_tdb_range_high
-        default_low_range = samba_config[3].idmap_tdb_range_low 
 
-    # validate the UID #
-    if not (low_range <= int(id_lists[0][0]) <= high_range):
-        return False
- 
-    # validate the primary GID #
-    if not (low_range <= int(id_lists[1][0]) <= high_range):
-        return False
- 
-    # validate the supplementary groups
-    for i in id_lists[2]:
-        domain_split = i[1].split('\\')
-        if (domain_split[0] == "BUILTIN" and samba_config[1].ad_idmap_backend != 'autorid'):
-            if not (default_low_range <= int(i[0]) <= default_high_range):
-                return False 
-            else:
-                continue
+def validate_time(ntp_server):
+    # to do: should use UTC instead of local time. On other hand,
+    # this is not a big con for a manual smoke-test.
 
-        if not (low_range <= int(i[0]) <= high_range):
-            return False
+    truenas_time = datetime.datetime.now()
+    c = ntplib.NTPClient()
+    try:
+        response = c.request(ntp_server)
+    except:
+        return "error querying ntp_server"
 
-    return True
-       
+    ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
 
-def validate_domain_sids(samba_config, id_lists):
-    domain_sid = get_domain_sid(samba_config[1].ad_domainname) 
-    
-    # validate user SID
-    if domain_sid not in id_lists[0][2]:
-        return False
+    # I'm only concerned about clockskew and not who is to blame.
+    if ntp_time > truenas_time:
+        clockskew = ntp_time - truenas_time
+    else:
+        clockskew = truenas_time - ntp_time
 
-    # validate primary group SID
-    if domain_sid not in id_lists[1][2]:
-        return False
-
-    # validate supplementary groups
-    for i in id_lists[2]:
-        domain_split = i[1].split('\\')
-        domain_sid = get_domain_sid(domain_split[0])
-        if domain_sid not in i[2]:
-            return False
-
-    return True
-
+    return clockskew
 
 def main():
-    client = Client()
-    samba_config = get_samba_config_data(client)
-    if not samba_config:
-        print("failed to get samba config from middleware")
-        return False   
+    #####################################
+    # Grab information from Config File #
+    #####################################
+    server_names = []
+    bind_ips = []
+    FREENAS_DB = '/data/freenas-v1.db'
+    conn = sqlite3.connect(FREENAS_DB)
+    conn.row_factory = lambda cursor, row: row[0]
+    c = conn.cursor()
+
+    # Get NTP Servers
+    c.execute('SELECT ntp_address FROM system_ntpserver')
+    config_ntp_servers = c.fetchall()
+
+    # Get IP Addresses for NICs
+    c.execute('SELECT int_ipv4address FROM network_interfaces')
+    config_ipv4_addresses = c.fetchall()
+
+    c.execute('SELECT cifs_srv_bindip FROM services_cifs')
+    cifs_srv_bind_ip = c.fetchone()
+
+    if (cifs_srv_bind_ip):
+       bind_ips = str(cifs_srv_bind_ip).split(",")
     else:
-        print("Generate samba_config via middleware calls: SUCCESS")
-
-    # By default check data on administrator account. This *should* exist in ad environment
-    # optionally override by passing and argument to the script
-    username = "%s\Administrator" % samba_config[1].ad_domainname
-
-    if (len(sys.argv) > 1):
-        username = sys.argv[1]
+       bind_ips.append(config_ipv4_addresses)
     
-    id_output = get_id_output(username)
+    # Get AD domain name
+    c.execute('SELECT ad_domainname FROM directoryservice_activedirectory')
+    ad_domainname = c.fetchone()
 
-    # If we return something in stderr, exit and print error
-    if not id_output:
-        return False
+    # Get Global Configuration Domain Network
+    c.execute('SELECT gc_domain FROM network_globalconfiguration')
+    gc_domain = c.fetchone()
 
-    id_lists = convert_id_to_lists(id_output)
-    if not validate_xid_ranges(samba_config, id_lists):
-        print("Validate idmap ranges: FAIL")
-        return False
-    else:
-        print("Validate idmap ranges: SUCCESS")
+    c.execute('SELECT gc_hostname FROM network_globalconfiguration')
+    gc_hostname = c.fetchone()
+
+    c.execute('SELECT gc_hostname_b FROM network_globalconfiguration')
+    gc_hostname_b = c.fetchone()
+
+    c.execute('SELECT gc_hostname_virtual FROM network_globalconfiguration')
+    gc_hostname_virtual = c.fetchone()
     
-    if not validate_domain_sids(samba_config, id_lists):
-        print("Validate SIDs: FAIL")
-        return False
-    else:
-        print("Validate SIDs: SUCCESS")
-    
-    col_width = max(len(word) for row in id_lists[2] for word in row) + 2 # padding 
-    header = ['XID', 'NAME', 'SID']
-    print("Dumping ID information for user %s" % username)
-    print("UID: %s     Name: %s     SID: %s" % (id_lists[0][0],id_lists[0][1],id_lists[0][2]))
-    print("Primary Group")
-    print("GID: %s     Name: %s     SID: %s" % (id_lists[1][0],id_lists[1][1],id_lists[1][2]))
-    print("Supplementary Groups")
-    for i in id_lists[2]:
-        print("GID: %s     Name: %s    SID: %s" % (i[0], i[1], i[2]))
+    server_names.append(gc_hostname + "." + ad_domainname)
+
+    if (gc_hostname_b) and (gc_hostname_b != "truenas-b"):
+       server_names.append(gc_hostname_b + "." + ad_domainname)
+
+    if (gc_hostname_virtual):
+       server_names.append(gc_hostname_virtual + "." + ad_domainname)
+
+    # Get config DNS servers
+    c.execute('SELECT gc_nameserver1 FROM network_globalconfiguration')
+    config_nameserver1 = c.fetchone()
+    c.execute('SELECT gc_nameserver2 FROM network_globalconfiguration')
+    config_nameserver2 = c.fetchone()
+    c.execute('SELECT gc_nameserver3 FROM network_globalconfiguration')
+    config_nameserver3 = c.fetchone()
+    conn.close()
+
+    #####################################
+    # DNS query all the things          #
+    #####################################
+    ad_domain_controllers = get_domain_controllers(ad_domainname)
+    kerberos_domain_controllers = get_kerberos_domain_controllers(ad_domainname)
+    name_servers = get_name_servers(ad_domainname)
+    ldap_servers = get_ldap_servers(ad_domainname)
+    kpasswd_servers = get_kpasswd_servers(ad_domainname)
+    global_catalog_servers = get_global_catalog_servers(ad_domainname)
+    kerberos_servers = get_kerberos_servers(ad_domainname)
+
+    #############################
+    # CONFIG SANITY CHECKS      #
+    #############################
+
+    # See if domain name is set inconsistently
+    if ad_domainname != gc_domain:
+        print("WARNING: AD domain name %s does not match global configuration domain %s" % (ad_domainname, gc_domain))
+
+    # See if we've set name servers that aren't for our domain
+    name_server_ips = []
+    for name_server in name_servers:
+       name_server_ips.append(socket.gethostbyname(name_server))
+
+    if (config_nameserver1) and (config_nameserver1 not in name_server_ips):
+       print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver1,ad_domainname))
+
+    if (config_nameserver2) and (config_nameserver2 not in name_server_ips):
+       print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver2,ad_domainname))
+
+    if (config_nameserver3) and (config_nameserver3 not in name_server_ips):
+       print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver3,ad_domainname))
+
+
+    #############################
+    #  NTP CHECKS               #
+    #############################
+
+    ## Compare clockskew between system time and config ntp server time ##
+    config_permitted_clockskew = datetime.timedelta(minutes=1)
+    print("DEBUG: determining clock skew between system and configured NTP servers")
+    for ntp_server in config_ntp_servers:
+       config_clockskew = validate_time(ntp_server)
+       print("CONFIG_NTP_SERVERS: %s clockskew is: %s" % (ntp_server,config_clockskew))
+       try: 
+           if config_clockskew > config_permitted_clockskew:
+               print("   WARNING: clockskew between configured NTP server and system time is greater than 1 minute")
+       except:
+           pass
+
+    ## Compare clock skew between system time and DC time ##
+    ad_permitted_clockskew = datetime.timedelta(minutes=1)
+    for ad_domain_controller in ad_domain_controllers:
+       ad_clockskew = validate_time(str(ad_domain_controller.target))
+       print("AD_NTP_SERVERS: %s clockskew is: %s" % (ad_domain_controller.target,ad_clockskew))
+       try: 
+           if ad_clockskew > ad_permitted_clockskew:
+               print("   WARNING: clock skew between AD DC and system time is greater than 1 minute")
+       except:
+           pass
+
+    #############################
+    # DNS  CHECKS               #
+    #############################
+
+    # Verify that we can open sockets to the various AD components
+    for server in name_servers:
+       get_server_status(server, 53, "Name")
+
+    for server in ad_domain_controllers:
+       get_server_status(str(server.target), server.port, "AD/DC")
+
+    for server in ldap_servers:
+       get_server_status(str(server.target), server.port, "LDAPS")
+
+    for server in kerberos_servers:
+       get_server_status(str(server.target), server.port, "Kerberos")
+
+    for server in kerberos_domain_controllers:
+       get_server_status(str(server.target), server.port, "KDC")
+
+    for server in global_catalog_servers:
+       get_server_status(str(server.target), server.port, "Global Catalog")
+
+    print("DEBUG: Verifying server entries in IPv4 forward lookup zone")
+    my_resolver = dns.resolver.Resolver()
+    my_resolver.nameservers = name_server_ips 
+    for server_name in server_names: 
+      try:
+          forward_lookup = my_resolver.query(server_name)
+          server_address = str(forward_lookup.rrset).split()[4]
+          print("   SUCCESS - %s resolved to %s" % (server_name, server_address)) 
+      except:
+          print("   FAIL - address lookup for name %s unsuccessful" % (server_name))
+
+    print("DEBUG: Verifying server entries in IPv4 reverse lookup zone")
+    for address in bind_ips:
+       try:
+          host_name = socket.gethostbyaddr(address)
+          print("   SUCCESS - %s resolved to %s" % (address, host_name[0]))
+       except:
+          print("   FAIL - hostname lookup for address %s unsuccessful" % (address))
 
 if __name__ == '__main__':
     main()
