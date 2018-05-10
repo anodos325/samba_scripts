@@ -62,26 +62,42 @@ def xid_to_sid(xid_type, xid):
     output = p.communicate()
     return output[0].rstrip()
 
+############################################################################
+# Retrieve a de-facto smb.conf via middleware calls. This will also set    #
+# correct idmap backends for the AD domain and BUILTIN domain.             #
+############################################################################
+
 def get_samba_config_data(client):
     samba_config = []
     cifs_config = Struct(client.call('datastore.query', 'services.cifs', None, {'get': True}))
     ad_config = Struct(client.call('datastore.query', 'directoryservice.activedirectory', None, {'get': True}))
-    
-    if ad_config.ad_idmap_backend == "rid":
-        idmap_config = Struct(client.call('datastore.query', 'directoryservice.idmap_rid', None, {'get': True}))
-    elif str(ad_config.ad_idmap_backend) == 'autorid':
-        idmap_config = Struct(client.call('datastore.query', 'directoryservice.idmap_autorid', None, {'get': True}))
-    elif ad_config.ad_idmap_backend == "ad":
-        idmap_config = Struct(client.call('datastore.query', 'directoryservice.idmap_ad', None, {'get': True}))
-    else:
-        print("Error: idmap backend is set to %s" % ad_config.ad_idmap_backend)
+    default_idmap_config = Struct(client.call('datastore.query', 'directoryservice.idmap_tdb', None, {'get': True}))
+
+    idmap_backend_call = "directoryservice.idmap_%s" % ad_config.ad_idmap_backend
+
+    try:
+        idmap_config = Struct(client.call('datastore.query', idmap_backend_call, None, {'get': True}))
+    except:
+        print("failed to get idmap data via middleware calls")
         return False
 
-    samba_config.append(cifs_config)
-    samba_config.append(ad_config)
-    samba_config.append(idmap_config)
+    for item in [cifs_config, ad_config, idmap_config, default_idmap_config]:
+        samba_config.append(item) 
 
     return samba_config
+
+############################################################################
+# Retrieve domain SID for a given domain via wbinfo --domain-info.         #
+# Opted not to use 'net getdomainsid                                       #
+############################################################################
+
+def get_domain_sid(domain):
+    p = pipeopen("/usr/local/bin/wbinfo --domain-info=%s" % domain)
+
+    output = p.communicate()
+    split_output = output[0].splitlines()
+    domain_sid = split_output[2].split(': ')
+    return domain_sid[1]
 
 ############################################################################
 # Generate list of three lists: user, primary group, supplementary groups. #
@@ -102,17 +118,19 @@ def convert_id_to_lists(id_out):
     # Generate list of data for 'User' 
     norm_uid_data = split_output[0].strip('uid=').split('(')
     uid_to_sid = xid_to_sid("uid",norm_uid_data[0]) 
-    user.append(norm_uid_data[0])
-    user.append(norm_uid_data[1])
-    user.append(uid_to_sid)
+
+    for item in [norm_uid_data[0], norm_uid_data[1], uid_to_sid]:
+        user.append(item)
+
     output_list.append(user)
 
     # ditto for primary group
     norm_pri_gid_data = split_output[1].strip('gid=').split('(')
     pri_gid_to_sid = xid_to_sid("gid",norm_pri_gid_data[0]) 
-    pri_group.append(norm_pri_gid_data[0])
-    pri_group.append(norm_pri_gid_data[1])
-    pri_group.append(uid_to_sid)
+
+    for item in [norm_pri_gid_data[0], norm_pri_gid_data[1], uid_to_sid]:
+        pri_group.append(item)
+
     output_list.append(pri_group)
 
     # ditto for supplementary groups
@@ -120,29 +138,40 @@ def convert_id_to_lists(id_out):
     for group in sup_group_list:
         group_data = []
         norm_sup_group = group.split('(')
-        print(norm_sup_group)
         sup_group_sid = xid_to_sid("gid",norm_sup_group[0])
-        group_data.append(norm_sup_group[0])
-        group_data.append(norm_sup_group[1])
-        group_data.append(sup_group_sid)
+        
+        for item in [norm_sup_group[0], norm_sup_group[1], sup_group_sid]:
+            group_data.append(item)
+
         supp_groups.append(group_data)
 
     output_list.append(supp_groups)
          
     return output_list
 
+############################################################################
+# Verify that each user / group in 'id' output lies within the idmap range #
+# that has been set for the domain in question                             #
+############################################################################
+
 def validate_xid_ranges(samba_config, id_lists):
+
     if samba_config[1].ad_idmap_backend == 'autorid':
        high_range = samba_config[2].idmap_autorid_range_high
        low_range = samba_config[2].idmap_autorid_range_low
     elif samba_config[1].ad_idmap_backend == "rid":
        high_range = samba_config[2].idmap_rid_range_high
        low_range = samba_config[2].idmap_rid_range_low
+    elif samba_config[1].ad_idmap_backend == "ad":
+       high_range = samba_config[2].idmap_ad_range_high
+       low_range = samba_config[2].idmap_ad_range_low
     else:
        print("danger will robinson")
        return False
 
-    
+    if samba_config[1].ad_idmap_backend != 'autorid':
+        default_high_range = samba_config[3].idmap_tdb_range_high
+        default_low_range = samba_config[3].idmap_tdb_range_low 
 
     # validate the UID #
     if not (low_range <= int(id_lists[0][0]) <= high_range):
@@ -155,9 +184,11 @@ def validate_xid_ranges(samba_config, id_lists):
     # validate the supplementary groups
     for i in id_lists[2]:
         domain_split = i[1].split('\\')
-        print(domain_split)
-        if domain_split[0] == "BUILTIN":
-            continue 
+        if (domain_split[0] == "BUILTIN" and samba_config[1].ad_idmap_backend != 'autorid'):
+            if not (default_low_range <= int(i[0]) <= default_high_range):
+                return False 
+            else:
+                continue
 
         if not (low_range <= int(i[0]) <= high_range):
             return False
@@ -165,12 +196,35 @@ def validate_xid_ranges(samba_config, id_lists):
     return True
        
 
+def validate_domain_sids(samba_config, id_lists):
+    domain_sid = get_domain_sid(samba_config[1].ad_domainname) 
+    
+    # validate user SID
+    if domain_sid not in id_lists[0][2]:
+        return False
+
+    # validate primary group SID
+    if domain_sid not in id_lists[1][2]:
+        return False
+
+    # validate supplementary groups
+    for i in id_lists[2]:
+        domain_split = i[1].split('\\')
+        domain_sid = get_domain_sid(domain_split[0])
+        if domain_sid not in i[2]:
+            return False
+
+    return True
+
+
 def main():
     client = Client()
     samba_config = get_samba_config_data(client)
     if not samba_config:
         print("failed to get samba config from middleware")
         return False   
+    else:
+        print("Generate samba_config via middleware calls: SUCCESS")
 
     # By default check data on administrator account. This *should* exist in ad environment
     # optionally override by passing and argument to the script
@@ -184,8 +238,16 @@ def main():
 
     id_lists = convert_id_to_lists(id_output)
     if not validate_xid_ranges(samba_config, id_lists):
-        print("Failed to validate idmap ranges")
+        print("Validate idmap ranges: FAIL")
         return False
+    else:
+        print("Validate idmap ranges: SUCCESS")
+    
+    if not validate_domain_sids(samba_config, id_lists):
+        print("Validate SIDs: FAIL")
+        return False
+    else:
+        print("Validate SIDs: SUCCESS")
     
     print(id_lists)
 
