@@ -16,73 +16,17 @@ import sqlite3
 import dns.resolver
 import textwrap
 
-def get_domain_controllers(ad_domain):
-    answers = dns.resolver.query('_ldap._tcp.dc._msdcs.' + ad_domain, 'SRV')
-    for rdata in answers:
-       # If DC doesn't support ldaps, then we should throw error
-       rdata.port = 636
+if '/usr/local/www' not in sys.path:
+    sys.path.append('/usr/local/www')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'freenasUI.settings')
 
-    return answers
+import django
+from django.apps import apps
+if not apps.ready:
+    django.setup()
 
-def get_kerberos_servers(ad_domain):
-    answers = dns.resolver.query('_kerberos._tcp.' + ad_domain, 'SRV')
-
-    return answers 
-
-def get_name_servers(ad_domain):
-    name_servers = []
-    answers = dns.resolver.query(ad_domain, 'NS')
-    for rdata in answers:
-       formatted_rdata= str(rdata)
-       name_servers.append(formatted_rdata)
-
-    return name_servers 
-    
-def get_kerberos_domain_controllers(ad_domain):
-    answers = dns.resolver.query('_kerberos._tcp.dc._msdcs.' + ad_domain, 'SRV')
-
-    return answers 
-
-def get_kpasswd_servers(ad_domain):
-    answers = dns.resolver.query('_kpasswd._tcp.' + ad_domain, 'SRV')
-
-    return answers 
-
-def get_global_catalog_servers(ad_domain):
-    answers = dns.resolver.query('_gc._tcp.' + ad_domain, 'SRV')
-    for rdata in answers:
-       rdata.port = 3269 
-
-    return answers 
-
-def get_ldap_servers(ad_domain):
-    answers = dns.resolver.query('_ldap._tcp.' + ad_domain, 'SRV')
-    for rdata in answers:
-       rdata.port = 636
-
-    return answers 
-
-def service_is_listening(host, port):
-    ret = False
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # If it takes more than 10 seconds to connect, then we have some issues.
-    s.settimeout(10.0)
-    try:
-        s.connect((host, port))
-        ret = True
-
-    except:
-        ret = False
-
-    s.close()
-    return ret
-
-def get_server_status(host, port, server_type):
-    if service_is_listening(host, port):
-       print("DEBUG: open socket to %s Server %s reports - SUCCESS" % (server_type, host))
-    else:
-       print("DEBUG: open socket to %s Server %s reports - FAIL" % (server_type, host))
-
+from freenasUI.common.freenassysctl import freenas_sysctl as _fs
+from freenasUI.common.freenasldap import FreeNAS_ActiveDirectory
 
 def validate_time(ntp_server):
     # to do: should use UTC instead of local time. On other hand,
@@ -104,6 +48,13 @@ def validate_time(ntp_server):
         clockskew = truenas_time - ntp_time
 
     return clockskew
+
+
+def get_server_status(host, port, server_type):
+    if FreeNAS_ActiveDirectory.port_is_listening(host, port):
+       print("DEBUG: open socket to %s Server %s reports - SUCCESS" % (server_type, host))
+    else:
+       print("DEBUG: open socket to %s Server %s reports - FAIL" % (server_type, host))
 
 def main():
     #####################################
@@ -130,7 +81,7 @@ def main():
     if (cifs_srv_bind_ip):
        bind_ips = str(cifs_srv_bind_ip).split(",")
     else:
-       bind_ips.append(config_ipv4_addresses)
+       bind_ips = config_ipv4_addresses
     
     # Get AD domain name
     c.execute('SELECT ad_domainname FROM directoryservice_activedirectory')
@@ -169,13 +120,13 @@ def main():
     #####################################
     # DNS query all the things          #
     #####################################
-    ad_domain_controllers = get_domain_controllers(ad_domainname)
-    kerberos_domain_controllers = get_kerberos_domain_controllers(ad_domainname)
-    name_servers = get_name_servers(ad_domainname)
-    ldap_servers = get_ldap_servers(ad_domainname)
-    kpasswd_servers = get_kpasswd_servers(ad_domainname)
-    global_catalog_servers = get_global_catalog_servers(ad_domainname)
-    kerberos_servers = get_kerberos_servers(ad_domainname)
+    ad_domain_controllers = FreeNAS_ActiveDirectory.get_domain_controllers(ad_domainname)
+    kerberos_domain_controllers = FreeNAS_ActiveDirectory.get_kerberos_domain_controllers(ad_domainname)
+    name_servers = ad_domain_controllers 
+    ldap_servers = FreeNAS_ActiveDirectory.get_ldap_servers(ad_domainname) 
+    kpasswd_servers = FreeNAS_ActiveDirectory.get_kpasswd_servers(ad_domainname)
+    global_catalog_servers = FreeNAS_ActiveDirectory.get_global_catalog_servers(ad_domainname)
+    kerberos_servers = FreeNAS_ActiveDirectory.get_kerberos_servers(ad_domainname)
 
     #############################
     # CONFIG SANITY CHECKS      #
@@ -188,7 +139,7 @@ def main():
     # See if we've set name servers that aren't for our domain
     name_server_ips = []
     for name_server in name_servers:
-       name_server_ips.append(socket.gethostbyname(name_server))
+       name_server_ips.append(socket.gethostbyname(str(name_server.target)))
 
     if (config_nameserver1) and (config_nameserver1 not in name_server_ips):
        print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver1,ad_domainname))
@@ -206,7 +157,7 @@ def main():
 
     ## Compare clockskew between system time and config ntp server time ##
     config_permitted_clockskew = datetime.timedelta(minutes=1)
-    print("DEBUG: determining clock skew between system and configured NTP servers")
+    print("DEBUG: determining clock skew between NAS and configured NTP servers")
     for ntp_server in config_ntp_servers:
        config_clockskew = validate_time(ntp_server)
        print("CONFIG_NTP_SERVERS: %s clockskew is: %s" % (ntp_server,config_clockskew))
@@ -227,13 +178,14 @@ def main():
        except:
            pass
 
+
     #############################
     # DNS  CHECKS               #
     #############################
 
     # Verify that we can open sockets to the various AD components
     for server in name_servers:
-       get_server_status(server, 53, "Name")
+       get_server_status(str(server.target), 53, "Name")
 
     for server in ad_domain_controllers:
        get_server_status(str(server.target), server.port, "AD/DC")
@@ -268,6 +220,7 @@ def main():
           print("   SUCCESS - %s resolved to %s" % (address, host_name[0]))
        except:
           print("   FAIL - hostname lookup for address %s unsuccessful" % (address))
+
 
 if __name__ == '__main__':
     main()
