@@ -7,33 +7,18 @@ import pwd
 import re
 import sys
 import socket
-import subprocess
-import tempfile
 import time
-import logging
-import logging.config
 import ntplib
 import datetime
-import sqlite3
 import dns.resolver
-import textwrap
 
 if '/usr/local/www' not in sys.path:
     sys.path.append('/usr/local/www')
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'freenasUI.settings')
-
-import django
-from django.apps import apps
-if not apps.ready:
-    django.setup()
 
 from freenasUI.common.freenassysctl import freenas_sysctl as _fs
 from freenasUI.common.freenasldap import FreeNAS_ActiveDirectory
 
 def validate_time(ntp_server):
-    # to do: should use UTC instead of local time. On other hand,
-    # this is not a big con for a manual smoke-test.
-
     truenas_time = datetime.datetime.now()
     c = ntplib.NTPClient()
     try:
@@ -43,7 +28,6 @@ def validate_time(ntp_server):
 
     ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
 
-    # I'm only concerned about clockskew and not who is to blame.
     if ntp_time > truenas_time:
         clockskew = ntp_time - truenas_time
     else:
@@ -87,13 +71,13 @@ def validate_dns(alert_list, server_names, name_server_ips):
           forward_lookup = my_resolver.query(server_name)
           server_address = str(forward_lookup.rrset).split()[4]
       except:
-          alert_list.append("address lookup for name %s unsuccessful" % (server_name))
+          alert_list.append(f'address lookup for name {server_name} unsuccessful')
 
     return alert_list
 
 def get_server_status(host, port, server_type, alert_list):
     if not FreeNAS_ActiveDirectory.port_is_listening(host, port, timeout=1):
-       alert_list.append("Failed to open socket to %s Server %s" % (server_type, host))
+       alert_list.append(f'Failed to open socket to {server_type} Server {host}')
     return alert_list
 
 def main():
@@ -101,20 +85,14 @@ def main():
     # Grab information from Config File #
     #####################################
     server_names = []
-    bind_ips = []
     alert_list = []
+    config_nameservers = []
+
     ngc = Struct(Client().call('datastore.query', 'network.globalconfiguration', None, {'get': True}))
-    ifaces = Struct(Client().call('datastore.query', 'network.interfaces', None, {'get': True}))
     cifs = Struct(Client().call('datastore.query', 'services.cifs', None, {'get': True}))
     ad = Struct(Client().call('datastore.query', 'directoryservice.activedirectory', None, {'get': True})) 
 
-    config_ipv4_addresses = ifaces.int_ipv4address
     cifs_srv_bind_ip = cifs.cifs_srv_bindip
-
-    if (cifs_srv_bind_ip):
-       bind_ips = str(cifs_srv_bind_ip).split(",")
-    else:
-       bind_ips = config_ipv4_addresses
 
     server_names.append(ngc.gc_hostname + "." + ad.ad_domainname)
 
@@ -124,9 +102,9 @@ def main():
     if (ngc.gc_hostname_virtual):
        server_names.append(ngc.gc_hostname_virtual + "." + ad.ad_domainname)
 
-    config_nameserver1 = ngc.gc_nameserver1 
-    config_nameserver2 = ngc.gc_nameserver2 
-    config_nameserver3 = ngc.gc_nameserver3 
+    config_nameservers.append(ngc.gc_nameserver1)
+    config_nameservers.append(ngc.gc_nameserver2)
+    config_nameservers.append(ngc.gc_nameserver3)
 
     #############################
     # CONFIG SANITY CHECKS      #
@@ -135,22 +113,18 @@ def main():
 
     # See if domain name is set inconsistently
     if ad.ad_domainname != ngc.gc_domain:
-        print("AD domain name %s does not match global configuration domain %s" % (ad.ad_domainname, ngc.gc_domain))
+        alert_list.append(
+            f'AD domain name {ad.ad_domainname} does not match global config domain {ngc.gc_domain}'
+        )
 
     # See if we've set name servers that aren't for our domain
     name_server_ips = []
     for name_server in name_servers:
        name_server_ips.append(socket.gethostbyname(str(name_server.target)))
 
-    if (config_nameserver1) and (config_nameserver1 not in name_server_ips):
-       alert_list.append("%s is not a name server for AD domain %s" % (config_nameserver1,ad.ad_domainname))
-
-    if (config_nameserver2) and (config_nameserver2 not in name_server_ips):
-       alert_list.append("%s is not a name server for AD domain %s" % (config_nameserver2,ad.ad_domainname))
-
-    if (config_nameserver3) and (config_nameserver3 not in name_server_ips):
-       alert_list.append("%s is not a name server for AD domain %s" % (config_nameserver3,ad.ad_domainname))
-
+    for config_nameserver in config_nameservers:
+        if (config_nameserver) and (config_nameserver not in name_server_ips):
+            alert_list.append(f'{config_nameserver} is not a name server for AD domain {ad.ad_domainname}')
 
     #############################
     #  NTP CHECKS               #
@@ -159,10 +133,13 @@ def main():
     ## Compare clock skew between system time and DC time ##
     ad_permitted_clockskew = datetime.timedelta(minutes=1)
     for ad_domain_controller in name_servers:
+       ad_permitted_clockskew = datetime.timedelta(minutes=1)
        ad_clockskew = validate_time(str(ad_domain_controller.target))
        try: 
            if ad_clockskew > ad_permitted_clockskew:
-               alert_list.append("Clock skew from %s time is greater than 1 minute" % ad_domain_controller.target)
+               alert_list.append(
+                   f'Clock skew from {ad_domain_controller.target} is greater than 1 minute'
+               )
        except:
            pass
 
