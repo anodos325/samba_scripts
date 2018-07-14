@@ -1,4 +1,6 @@
 #!/usr/local/bin/python
+from middlewared.client import Client
+from middlewared.client.utils import Struct
 
 import os
 import pwd
@@ -49,12 +51,50 @@ def validate_time(ntp_server):
 
     return clockskew
 
+def validate_ad_srv(alert_list, ad_domainname, name_servers, site=None, ssl=" off"):
+    ad_domain_controllers = name_servers 
+    kerberos_domain_controllers = FreeNAS_ActiveDirectory.get_kerberos_domain_controllers(ad_domainname, site)
+    ldap_servers = FreeNAS_ActiveDirectory.get_ldap_servers(ad_domainname, site) 
+    kpasswd_servers = FreeNAS_ActiveDirectory.get_kpasswd_servers(ad_domainname)
+    global_catalog_servers = FreeNAS_ActiveDirectory.get_global_catalog_servers(ad_domainname, site, ssl)
+    kerberos_servers = FreeNAS_ActiveDirectory.get_kerberos_servers(ad_domainname, site)
 
-def get_server_status(host, port, server_type):
-    if FreeNAS_ActiveDirectory.port_is_listening(host, port):
-       print("DEBUG: open socket to %s Server %s reports - SUCCESS" % (server_type, host))
-    else:
-       print("DEBUG: open socket to %s Server %s reports - FAIL" % (server_type, host))
+    for server in name_servers:
+       get_server_status(str(server.target), 53, "Name", alert_list)
+
+    for server in ad_domain_controllers:
+       get_server_status(str(server.target), server.port, "AD/DC", alert_list)
+
+    for server in ldap_servers:
+       get_server_status(str(server.target), server.port, "LDAPS", alert_list)
+
+    for server in kerberos_servers:
+       get_server_status(str(server.target), server.port, "Kerberos", alert_list)
+
+    for server in kerberos_domain_controllers:
+       get_server_status(str(server.target), server.port, "KDC", alert_list)
+
+    for server in global_catalog_servers:
+       get_server_status(str(server.target), server.port, "Global Catalog", alert_list)
+
+    return alert_list
+
+def validate_dns(alert_list, server_names, name_server_ips):
+    my_resolver = dns.resolver.Resolver()
+    my_resolver.nameservers = name_server_ips 
+    for server_name in server_names: 
+      try:
+          forward_lookup = my_resolver.query(server_name)
+          server_address = str(forward_lookup.rrset).split()[4]
+      except:
+          alert_list.append("address lookup for name %s unsuccessful" % (server_name))
+
+    return alert_list
+
+def get_server_status(host, port, server_type, alert_list):
+    if not FreeNAS_ActiveDirectory.port_is_listening(host, port, timeout=1):
+       alert_list.append("Failed to open socket to %s Server %s" % (server_type, host))
+    return alert_list
 
 def main():
     #####################################
@@ -62,79 +102,40 @@ def main():
     #####################################
     server_names = []
     bind_ips = []
-    FREENAS_DB = '/data/freenas-v1.db'
-    conn = sqlite3.connect(FREENAS_DB)
-    conn.row_factory = lambda cursor, row: row[0]
-    c = conn.cursor()
+    alert_list = []
+    ngc = Struct(Client().call('datastore.query', 'network.globalconfiguration', None, {'get': True}))
+    ifaces = Struct(Client().call('datastore.query', 'network.interfaces', None, {'get': True}))
+    cifs = Struct(Client().call('datastore.query', 'services.cifs', None, {'get': True}))
+    ad = Struct(Client().call('datastore.query', 'directoryservice.activedirectory', None, {'get': True})) 
 
-    # Get NTP Servers
-    c.execute('SELECT ntp_address FROM system_ntpserver')
-    config_ntp_servers = c.fetchall()
-
-    # Get IP Addresses for NICs
-    c.execute('SELECT int_ipv4address FROM network_interfaces')
-    config_ipv4_addresses = c.fetchall()
-
-    c.execute('SELECT cifs_srv_bindip FROM services_cifs')
-    cifs_srv_bind_ip = c.fetchone()
+    config_ipv4_addresses = ifaces.int_ipv4address
+    cifs_srv_bind_ip = cifs.cifs_srv_bindip
 
     if (cifs_srv_bind_ip):
        bind_ips = str(cifs_srv_bind_ip).split(",")
     else:
        bind_ips = config_ipv4_addresses
-    
-    # Get AD domain name
-    c.execute('SELECT ad_domainname FROM directoryservice_activedirectory')
-    ad_domainname = c.fetchone()
 
-    # Get Global Configuration Domain Network
-    c.execute('SELECT gc_domain FROM network_globalconfiguration')
-    gc_domain = c.fetchone()
+    server_names.append(ngc.gc_hostname + "." + ad.ad_domainname)
 
-    c.execute('SELECT gc_hostname FROM network_globalconfiguration')
-    gc_hostname = c.fetchone()
+    if (ngc.gc_hostname_b) and (ngc.gc_hostname_b != "truenas-b"):
+       server_names.append(ngc.gc_hostname_b + "." + ad.ad_domainname)
 
-    c.execute('SELECT gc_hostname_b FROM network_globalconfiguration')
-    gc_hostname_b = c.fetchone()
+    if (ngc.gc_hostname_virtual):
+       server_names.append(ngc.gc_hostname_virtual + "." + ad.ad_domainname)
 
-    c.execute('SELECT gc_hostname_virtual FROM network_globalconfiguration')
-    gc_hostname_virtual = c.fetchone()
-    
-    server_names.append(gc_hostname + "." + ad_domainname)
-
-    if (gc_hostname_b) and (gc_hostname_b != "truenas-b"):
-       server_names.append(gc_hostname_b + "." + ad_domainname)
-
-    if (gc_hostname_virtual):
-       server_names.append(gc_hostname_virtual + "." + ad_domainname)
-
-    # Get config DNS servers
-    c.execute('SELECT gc_nameserver1 FROM network_globalconfiguration')
-    config_nameserver1 = c.fetchone()
-    c.execute('SELECT gc_nameserver2 FROM network_globalconfiguration')
-    config_nameserver2 = c.fetchone()
-    c.execute('SELECT gc_nameserver3 FROM network_globalconfiguration')
-    config_nameserver3 = c.fetchone()
-    conn.close()
-
-    #####################################
-    # DNS query all the things          #
-    #####################################
-    ad_domain_controllers = FreeNAS_ActiveDirectory.get_domain_controllers(ad_domainname)
-    kerberos_domain_controllers = FreeNAS_ActiveDirectory.get_kerberos_domain_controllers(ad_domainname)
-    name_servers = ad_domain_controllers 
-    ldap_servers = FreeNAS_ActiveDirectory.get_ldap_servers(ad_domainname) 
-    kpasswd_servers = FreeNAS_ActiveDirectory.get_kpasswd_servers(ad_domainname)
-    global_catalog_servers = FreeNAS_ActiveDirectory.get_global_catalog_servers(ad_domainname)
-    kerberos_servers = FreeNAS_ActiveDirectory.get_kerberos_servers(ad_domainname)
+    config_nameserver1 = ngc.gc_nameserver1 
+    config_nameserver2 = ngc.gc_nameserver2 
+    config_nameserver3 = ngc.gc_nameserver3 
 
     #############################
     # CONFIG SANITY CHECKS      #
     #############################
+    name_servers = FreeNAS_ActiveDirectory.get_domain_controllers(ad.ad_domainname, site=ad.ad_site)
 
     # See if domain name is set inconsistently
-    if ad_domainname != gc_domain:
-        print("WARNING: AD domain name %s does not match global configuration domain %s" % (ad_domainname, gc_domain))
+    if ad.ad_domainname != ngc.gc_domain:
+        print("AD domain name %s does not match global configuration domain %s" % (ad.ad_domainname, ngc.gc_domain))
 
     # See if we've set name servers that aren't for our domain
     name_server_ips = []
@@ -142,85 +143,40 @@ def main():
        name_server_ips.append(socket.gethostbyname(str(name_server.target)))
 
     if (config_nameserver1) and (config_nameserver1 not in name_server_ips):
-       print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver1,ad_domainname))
+       alert_list.append("%s is not a name server for AD domain %s" % (config_nameserver1,ad.ad_domainname))
 
     if (config_nameserver2) and (config_nameserver2 not in name_server_ips):
-       print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver2,ad_domainname))
+       alert_list.append("%s is not a name server for AD domain %s" % (config_nameserver2,ad.ad_domainname))
 
     if (config_nameserver3) and (config_nameserver3 not in name_server_ips):
-       print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver3,ad_domainname))
+       alert_list.append("%s is not a name server for AD domain %s" % (config_nameserver3,ad.ad_domainname))
 
 
     #############################
     #  NTP CHECKS               #
     #############################
 
-    ## Compare clockskew between system time and config ntp server time ##
-    config_permitted_clockskew = datetime.timedelta(minutes=1)
-    print("DEBUG: determining clock skew between NAS and configured NTP servers")
-    for ntp_server in config_ntp_servers:
-       config_clockskew = validate_time(ntp_server)
-       print("CONFIG_NTP_SERVERS: %s clockskew is: %s" % (ntp_server,config_clockskew))
-       try: 
-           if config_clockskew > config_permitted_clockskew:
-               print("   WARNING: clockskew between configured NTP server and system time is greater than 1 minute")
-       except:
-           pass
-
     ## Compare clock skew between system time and DC time ##
     ad_permitted_clockskew = datetime.timedelta(minutes=1)
-    for ad_domain_controller in ad_domain_controllers:
+    for ad_domain_controller in name_servers:
        ad_clockskew = validate_time(str(ad_domain_controller.target))
-       print("AD_NTP_SERVERS: %s clockskew is: %s" % (ad_domain_controller.target,ad_clockskew))
        try: 
            if ad_clockskew > ad_permitted_clockskew:
-               print("   WARNING: clock skew between AD DC and system time is greater than 1 minute")
+               alert_list.append("Clock skew from %s time is greater than 1 minute" % ad_domain_controller.target)
        except:
            pass
-
 
     #############################
     # DNS  CHECKS               #
     #############################
 
-    # Verify that we can open sockets to the various AD components
-    for server in name_servers:
-       get_server_status(str(server.target), 53, "Name")
-
-    for server in ad_domain_controllers:
-       get_server_status(str(server.target), server.port, "AD/DC")
-
-    for server in ldap_servers:
-       get_server_status(str(server.target), server.port, "LDAPS")
-
-    for server in kerberos_servers:
-       get_server_status(str(server.target), server.port, "Kerberos")
-
-    for server in kerberos_domain_controllers:
-       get_server_status(str(server.target), server.port, "KDC")
-
-    for server in global_catalog_servers:
-       get_server_status(str(server.target), server.port, "Global Catalog")
-
-    print("DEBUG: Verifying server entries in IPv4 forward lookup zone")
-    my_resolver = dns.resolver.Resolver()
-    my_resolver.nameservers = name_server_ips 
-    for server_name in server_names: 
-      try:
-          forward_lookup = my_resolver.query(server_name)
-          server_address = str(forward_lookup.rrset).split()[4]
-          print("   SUCCESS - %s resolved to %s" % (server_name, server_address)) 
-      except:
-          print("   FAIL - address lookup for name %s unsuccessful" % (server_name))
-
-    print("DEBUG: Verifying server entries in IPv4 reverse lookup zone")
-    for address in bind_ips:
-       try:
-          host_name = socket.gethostbyaddr(address)
-          print("   SUCCESS - %s resolved to %s" % (address, host_name[0]))
-       except:
-          print("   FAIL - hostname lookup for address %s unsuccessful" % (address))
-
+    validate_ad_srv(alert_list, ad.ad_domainname, name_servers,  site=ad.ad_site, ssl=ad.ad_ssl)
+    validate_dns(alert_list, server_names, name_server_ips)
+    if alert_list:
+        for alert in alert_list:
+            print(alert)
+    else:
+        print("Everything works! Yay!")
 
 if __name__ == '__main__':
     main()
