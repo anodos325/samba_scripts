@@ -1,66 +1,22 @@
 #!/usr/local/bin/python
-
 from middlewared.client import Client
-from middlewared.client.utils import Struct
 
 import os
 import pwd
 import re
 import sys
 import socket
-import subprocess
-import tempfile
 import time
-import logging
-import logging.config
+import ntplib
+import datetime
+import dns.resolver
 
-sys.path.extend([
-    '/usr/local/www',
-    '/usr/local/www/freenasUI'
-])
+if '/usr/local/www' not in sys.path:
+    sys.path.append('/usr/local/www')
 
-logging.config.dictConfig({
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'simple': {
-            'format': '[%(name)s:%(lineno)s] %(message)s'
-        },
-    },
-    'handlers': {
-        'syslog': {
-            'level': 'DEBUG',
-            'class': 'logging.handlers.SysLogHandler',
-            'formatter': 'simple',
-        }
-    },
-    'loggers': {
-        '': {
-            'handlers': ['syslog'],
-            'level': 'DEBUG',
-            'propagate': True,
-        },
-    }
-})
-
+from freenasUI.common.freenassysctl import freenas_sysctl as _fs
+from freenasUI.common.freenasldap import FreeNAS_ActiveDirectory
 from freenasUI.common.pipesubr import pipeopen
-from freenasUI.common.log import log_traceback
-from freenasUI.common.freenassysctl import freenas_sysctl as fs
-
-log = logging.getLogger('ad_ctl')
-
-def validate_hosts(cifs_config):
-    hosts = open('/etc/hosts','r')
-    for line in hosts:
-        if str(cifs_config.cifs_srv_netbiosname) in str(line):
-            return True
-
-    return False
-
-def validate_klist(krb_config):
-    p = pipeopen("/usr/bin/klist")
-    output = p.communicate()
-    print(output)
 
 def service_launcher(service, command):
     p = pipeopen("/usr/sbin/service %s %s" % (service, command))
@@ -68,37 +24,43 @@ def service_launcher(service, command):
     if p.returncode != 0:
         print("Service %s failed on command %s " % (service, command))
         return False
-
     return True
+
+def get_db_values():
+    conf = {} 
+    conf['ad'] = Client().call('datastore.query', 'directoryservice.ActiveDirectory', None, {'get': True})
+    conf['ldap'] = Client().call('datastore.query', 'directoryservice.LDAP', None, {'get':True})
+    conf['cifs'] = Client().call('datastore.query', 'services.cifs', None, {'get':True})
+    return conf
+
+def testjoin():
 
 
 def main():
-    client = Client()
-    cifs_config = Struct(client.call('datastore.query', 'services.cifs', None, {'get': True}))
-    krb_config = Struct(client.call('datastore.query', 'services.cifs', None, {'get': True}))
+    db = get_db_values()
+    service_launcher("ix-hostname", "quietstart")
+    krb_realm=(db['ad']['ad_kerberos_realm']['krb_realm'])
+    service_launcher("ix-kerberos", f'quietstart default {krb_realm}') 
+    Client().call('etc.generate', 'nss')
 
-    if not validate_hosts(cifs_config):
-        print("restarting ix-hostname service")
-        service_launcher("ix-hostname", "quietstart")
-    
-   # validate_klist("krb_config.krb_realm")
-
-    service_launcher("ix-kerberos", "quietstart")
-
-    service_launcher("ix-nsswitch", "quietstart")
+    if db['ldap']['ldap_enable']:
+        print('generating ldap_conf')
+        Client().call('etc.generate', 'ldap')
 
     if not service_launcher("ix-kinit", "status"):
         if not service_launcher("ix-kinit", "quietstart"):
-             print("ix-kinit failed")
+            print("ix-kinit failed")
 
-    service_launcher("ix-pre-samba", "quietstart")
+    if db['ad']['ad_unix_extensions']:
+        service_launcher("ix-sssd", "start")
+        if service_launcher("sssd", "status"):
+            service_launcher("sssd", "restart")
+        else:
+            service_launcher("sssd", "start")
 
-    service_launcher("ix-activedirectory", "quietstart")
+    service_launcher("ix-pre-samba", "start")   
 
-    service_launcher("samba_server", "restart")
 
-    service_launcher("ix-pam", "quietstart")
-    service_launcher("ix-cache", "quietstart")
-    
+
 if __name__ == '__main__':
     main()
