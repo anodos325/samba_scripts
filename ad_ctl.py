@@ -126,7 +126,9 @@ def start():
 
 def stop():
     db = get_db_values()
-    
+    Client().call('datastore.update','directoryservice.ActiveDirectory', db['ad']['id'], {'ad_enable':'False'})
+    Client().call('datastore.update','services.services',db['cifs']['id'], {'srv_enable':'False'})
+    service_launcher("samba_server", "stop")
 
 def main():
     start()
