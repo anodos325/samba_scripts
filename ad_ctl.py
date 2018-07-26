@@ -6,11 +6,6 @@ import os
 import pwd
 import re
 import sys
-import socket
-import time
-import ntplib
-import datetime
-import dns.resolver
 import subprocess
 
 if '/usr/local/www' not in sys.path:
@@ -23,7 +18,8 @@ if not apps.ready:
     django.setup()
 
 from freenasUI.common.freenassysctl import freenas_sysctl as _fs
-from freenasUI.common.freenasldap import FreeNAS_ActiveDirectory
+from freenasUI.common.freenasldap import FreeNAS_ActiveDirectory as FNAD
+from freenasUI.common.freenasldap import FLAGS_DBINIT
 from freenasUI.common.pipesubr import pipeopen
 
 NETCMD = "/usr/local/bin/net -k -d 5 ads"
@@ -42,7 +38,7 @@ def get_db_values():
     conf = {} 
     conf['ad'] = Client().call('datastore.query', 'directoryservice.ActiveDirectory', None, {'get': True})
     conf['ldap'] = Client().call('datastore.query', 'directoryservice.LDAP', None, {'get':True})
-    conf['cifs'] = Client().call('datastore.query', 'services.cifs', None, {'get':True})
+    conf['cifs'] = Client().call('datastore.query', 'services.services', [['srv_service','=','cifs']], {'get':True})
     return conf
 
 def netads(db, command, bind_dc):
@@ -67,16 +63,35 @@ def netads(db, command, bind_dc):
 
 def start():
     db = get_db_values()
-    favored_dc = None
-    dcs = FreeNAS_ActiveDirectory.get_domain_controllers(
-                                                         db['ad']['ad_domainname'],
-                                                         site=db['ad']['ad_site'], 
-                                                         ssl=db['ad']['ad_ssl']
-                                                        )
+    if not db['ad']['ad_enable']:
+        Client().call('datastore.update','directoryservice.ActiveDirectory', db['ad']['id'], {'ad_enable':'True'})
+    if not db['cifs']['srv_enable']:
+        Client().call('datastore.update','services.services',db['cifs']['id'], {'srv_enable':'True'}) 
 
-    if len(dcs) <= 10:
-        favored_dc = FreeNAS_ActiveDirectory.get_best_host(dcs)
+    favored_dc = None
+    dcs = FNAD.get_domain_controllers(
+                                      db['ad']['ad_domainname'],
+                                      site=db['ad']['ad_site'],
+                                      ssl=db['ad']['ad_ssl']
+                                     )
+
+    '''
+    For performing domain join / AD start, we minimize the amount
+    of complex operations that we're performing. This avoiding an 
+    extra LDAP bind here if possible.
+    '''
+    if len(dcs) <= 5:
+        favored_dc = FNAD.get_best_host(dcs)
         print(f'favored dc is {favored_dc}')
+    else:
+        ''' 
+        locate_site() requires an LDAP connection
+        ''' 
+        fn = FNAD(FLAGS_DBINIT)
+        site = fn.locate_site()
+        dcs = fn.get_domain_controllers(db['ad']['ad_domainname'], site, ssl=db['ad']['ad_ssl'])
+        if len(dcs) <= 5:
+            favored_dc = FNAD.get_best_host(dcs)
 
     service_launcher("ix-hostname", "quietstart")
     krb_realm=(db['ad']['ad_kerberos_realm']['krb_realm'])
@@ -105,12 +120,13 @@ def start():
         print('preparing to join domain')
         netads(db, "join", bind_dc=favored_dc)
 
-    Client().call('service.reload', 'activedirectory')
+    service_launcher("samba_server", "restart")
     Client().call('etc.generate', 'pam')
     service_launcher("ix-cache", "quietstart")
 
 def stop():
-    db = get_db_values
+    db = get_db_values()
+    
 
 def main():
     start()
