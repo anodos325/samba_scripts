@@ -38,7 +38,8 @@ def get_db_values():
     conf = {} 
     conf['ad'] = Client().call('datastore.query', 'directoryservice.ActiveDirectory', None, {'get': True})
     conf['ldap'] = Client().call('datastore.query', 'directoryservice.LDAP', None, {'get':True})
-    conf['cifs'] = Client().call('datastore.query', 'services.services', [['srv_service','=','cifs']], {'get':True})
+    conf['cifs'] = Client().call('datastore.query', 'services.cifs', None, {'get':True})
+    conf['cifs_srv'] = Client().call('datastore.query', 'services.services', [['srv_service','=','cifs']], {'get':True})
     return conf
 
 def netads(db, command, bind_dc):
@@ -63,10 +64,17 @@ def netads(db, command, bind_dc):
 
 def start():
     db = get_db_values()
+    if db['cifs']['cifs_srv_netbiosname'] == db['cifs']['cifs_srv_netbiosname_b']:
+        '''
+        Logic for checking if we've configured samba to only run on the active storage controller
+        '''
+        if not Client().call('notifier.failover_status') == "MASTER":
+            return False
+
     if not db['ad']['ad_enable']:
         Client().call('datastore.update','directoryservice.ActiveDirectory', db['ad']['id'], {'ad_enable':'True'})
-    if not db['cifs']['srv_enable']:
-        Client().call('datastore.update','services.services',db['cifs']['id'], {'srv_enable':'True'}) 
+    if not db['cifs_srv']['srv_enable']:
+        Client().call('datastore.update','services.services',db['cifs_srv']['id'], {'srv_enable':'True'}) 
 
     favored_dc = None
     dcs = FNAD.get_domain_controllers(
@@ -80,21 +88,26 @@ def start():
     of complex operations that we're performing. This avoiding an 
     extra LDAP bind here if possible.
     '''
-    if len(dcs) <= 5:
+    if len(dcs) <= 1:
         favored_dc = FNAD.get_best_host(dcs)
         print(f'favored dc is {favored_dc}')
     else:
         ''' 
         locate_site() requires an LDAP connection
         ''' 
-        fn = FNAD(FLAGS_DBINIT)
+        fn = FNAD(flags=FLAGS_DBINIT)
+        print("locating site")
         site = fn.locate_site()
         dcs = fn.get_domain_controllers(db['ad']['ad_domainname'], site, ssl=db['ad']['ad_ssl'])
         if len(dcs) <= 5:
             favored_dc = FNAD.get_best_host(dcs)
 
     service_launcher("ix-hostname", "quietstart")
-    krb_realm=(db['ad']['ad_kerberos_realm']['krb_realm'])
+    try:
+        krb_realm=(db['ad']['ad_kerberos_realm']['krb_realm'])
+    except:
+        krb_realm=(db['ad']['ad_domainname'])
+
     service_launcher("ix-kerberos", command=f'quietstart default {krb_realm}') 
 
     Client().call('etc.generate', 'nss')
@@ -127,11 +140,33 @@ def start():
 def stop():
     db = get_db_values()
     Client().call('datastore.update','directoryservice.ActiveDirectory', db['ad']['id'], {'ad_enable':'False'})
-    Client().call('datastore.update','services.services',db['cifs']['id'], {'srv_enable':'False'})
+    Client().call('datastore.update','services.services',db['cifs_srv']['id'], {'srv_enable':'False'})
     service_launcher("samba_server", "stop")
 
+def restart():
+    db = get_db_values()
+    if db['ad']['ad_unix_extensions']:
+        service_launcher("ix-sssd", "start")
+        if service_launcher("sssd", "status"):
+            service_launcher("sssd", "restart")
+        else:
+            service_launcher("sssd", "start")
+
+    service_launcher("ix-pre-samba", "start")   
+    service_launcher("samba_server", "restart")
+    if not Client().call('service.started', 'active.directory'):
+        start()
+
 def main():
-    start()
+    if len(sys.argv) == 2:
+        if sys.argv[1] == "start":
+            start()
+        elif sys.argv[1] == "stop":
+            stop()
+        elif sys.argv[1] == "restart":
+            restart() 
+        else:
+            return False
 
 if __name__ == '__main__':
     main()
