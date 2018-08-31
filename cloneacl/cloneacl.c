@@ -1,11 +1,3 @@
-NO_MAN=
-
-.include <bsd.own.mk>
-
-PROG= cloneacl	
-BINDIR=	/usr/bin
-
-.include <bsd.prog.mk>
 /*
  * Copyright 2018 iXsystems, Inc.
  */
@@ -45,12 +37,9 @@ usage(char *path)
 struct windows_acl_info {
 
 #define	WA_NULL			0x00000000	/* nothing */
-#define	WA_VERBOSE		0x00000040	/* print more stuff */
+#define	WA_VERBOSE		0x00000001	/* print more stuff */
 
 /* default ACL entries if none are specified */
-
-#define	WA_OP_SET	(WA_APPEND|WA_REMOVE|WA_UPDATE|WA_RESET)
-#define	WA_OP_CHECK(flags, bit) ((flags & ~bit) & WA_OP_SET)
 
 	char *source;
 	char *path;
@@ -108,34 +97,6 @@ free_windows_acl_info(struct windows_acl_info *w)
 	acl_free(w->dacl);
 	acl_free(w->facl);
 	free(w);
-}
-
-/*
- * read acl text from a file and return the corresponding acl
- */
-acl_t
-get_acl_from_file(const char *filename)
-{
-	FILE *file;
-	size_t len;
-	char buf[BUFSIZ+1];
-
-	if (filename == NULL)
-		err(1, "(null) filename in get_acl_from_file()");
-
-	len = fread(buf, (size_t)1, sizeof(buf) - 1, file);
-	buf[len] = '\0';
-	if (ferror(file) != 0) {
-		fclose(file);
-		err(1, "error reading from %s", filename);
-	} else if (feof(file) == 0) {
-		fclose(file);
-		errx(1, "line too long in %s", filename);
-	}
-
-	fclose(file);
-
-	return (acl_from_text(buf));
 }
 
 static int
@@ -435,10 +396,13 @@ set_windows_acls(struct windows_acl_info *w)
 int
 main(int argc, char **argv)
 {
-	int	carried_error = 0;
-	int	ch, error, i, ret;
+	int	ch, error, ret;
 	struct 	windows_acl_info *w;
 	acl_t	source_acl;
+
+	if (argc < 2) {
+		usage(argv[0]);
+	}
 
 	w = new_windows_acl_info();
 
@@ -459,10 +423,16 @@ main(int argc, char **argv)
 		}
 	}
 
+	/* set the source to the destination if we lack -s */
+	if (w->source == NULL) {
+		w->source = w->path;
+	}
+
 	ret = pathconf(w->source, _PC_ACL_NFS4);
 
 	if (ret < 0) {
-		warn("%s: pathconf(..., _PC_ACL_NFS4) failed", w->source);
+		warn("%s: pathconf(..., _PC_ACL_NFS4) failed. Path does not have NFS4 ACL.", w->source);
+		free_windows_acl_info(w);
 		return (-1);
 	}
 
@@ -472,6 +442,7 @@ main(int argc, char **argv)
 
 	if (w->source_acl < 0) {
 		warn("failed to get acl from source");
+		free_windows_acl_info(w);
 		return (-1);
 	}
 
