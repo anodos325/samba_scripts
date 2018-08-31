@@ -398,12 +398,6 @@ set_windows_acls(struct windows_acl_info *w)
 	if (w == NULL)
 		return (-1);
 
-	/* recursive not set, only do this entry */
-	if (!(w->flags & WA_RECURSIVE)) {
-		set_windows_acl(w, NULL, 0);
-		return (0);
-	}
-
 	paths[0] = w->path;
 	paths[1] = NULL;
 	options = FTS_LOGICAL|FTS_NOSTAT;
