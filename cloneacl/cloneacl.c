@@ -1,3 +1,11 @@
+NO_MAN=
+
+.include <bsd.own.mk>
+
+PROG= cloneacl	
+BINDIR=	/usr/bin
+
+.include <bsd.prog.mk>
 /*
  * Copyright 2018 iXsystems, Inc.
  */
@@ -37,15 +45,7 @@ usage(char *path)
 struct windows_acl_info {
 
 #define	WA_NULL			0x00000000	/* nothing */
-#define	WA_FILES		0x00000001	/* only files */
-#define	WA_DIRECTORIES		0x00000002	/* only directories */
-#define	WA_APPEND		0x00000004	/* append entrie(s) */
-#define	WA_REMOVE		0x00000008	/* remove entrie(s) */
-#define	WA_UPDATE		0x00000010	/* update entrie(s) */
-#define	WA_RECURSIVE		0x00000020	/* recursive */
 #define	WA_VERBOSE		0x00000040	/* print more stuff */
-#define	WA_RESET		0x00000080	/* set defaults */
-#define WA_DOSATTRIB		0x00000100	/* DOS extended attribute */
 
 /* default ACL entries if none are specified */
 
@@ -472,7 +472,6 @@ main(int argc, char **argv)
 		return (-1);
 	}
 
-/*	source_acl = get_acl_from_file(w->source);*/
 	source_acl = acl_get_file(w->source, ACL_TYPE_NFS4);
 	w->source_acl = acl_dup(source_acl);
 	acl_free(source_acl);
