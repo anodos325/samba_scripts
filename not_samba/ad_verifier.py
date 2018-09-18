@@ -1,6 +1,5 @@
 #!/usr/local/bin/python
 from middlewared.client import Client
-from middlewared.client.utils import Struct
 
 import os
 import pwd
@@ -27,12 +26,22 @@ def get_config():
     conf['cifs'] = Client().call('datastore.query', 'services.cifs', None, {'get': True})
     conf['ad'] = Client().call('datastore.query', 'directoryservice.activedirectory', None, {'get': True})
     conf['gc'] = Client().call('datastore.query', 'network.globalconfiguration', None, {'get': True})
-    conf['ns'] = FreeNAS_ActiveDirectory.get_domain_controllers(conf['ad']['ad_domainname'], site=conf['ad']['ad_site']) 
+
+    try:
+        conf['ns'] = FreeNAS_ActiveDirectory.get_domain_controllers(conf['ad']['ad_domainname'], site=conf['ad']['ad_site']) 
+    except:
+        printf(f'Unable to get domain controllers for {conf["ad"]["ad_domainname"]}')
+        sys_exit(1)
+
     conf['server_names'] = []
+    conf['ns_ips'] = []
     conf['config_ns'] = []
     conf['config_ns'].append(conf['gc']['gc_nameserver1'])
     conf['config_ns'].append(conf['gc']['gc_nameserver2'])
     conf['config_ns'].append(conf['gc']['gc_nameserver3'])
+
+    for name_server in conf['ns']:
+        conf['ns_ips'].append(socket.gethostbyname(str(name_server.target)))
 
     conf['server_names'].append(conf['gc']['gc_hostname'] + "." + conf['ad']['ad_domainname'])
     
@@ -117,59 +126,28 @@ def get_server_status(host, port, server_type, alert_list):
 
     return alert_list
 
-def main():
-    #####################################
-    # Grab information from Config File #
-    #####################################
-    server_names = []
-    alert_list = []
-    config_nameservers = []
-
-    ngc = Struct(Client().call('datastore.query', 'network.globalconfiguration', None, {'get': True}))
-    cifs = Struct(Client().call('datastore.query', 'services.cifs', None, {'get': True}))
-    ad = Struct(Client().call('datastore.query', 'directoryservice.activedirectory', None, {'get': True})) 
-
-    cifs_srv_bind_ip = cifs.cifs_srv_bindip
-
-    server_names.append(ngc.gc_hostname + "." + ad.ad_domainname)
-
-    if (ngc.gc_hostname_b) and (ngc.gc_hostname_b != "truenas-b"):
-       server_names.append(ngc.gc_hostname_b + "." + ad.ad_domainname)
-
-    if (ngc.gc_hostname_virtual):
-       server_names.append(ngc.gc_hostname_virtual + "." + ad.ad_domainname)
-
-    config_nameservers.append(ngc.gc_nameserver1)
-    config_nameservers.append(ngc.gc_nameserver2)
-    config_nameservers.append(ngc.gc_nameserver3)
-
-    #############################
-    # CONFIG SANITY CHECKS      #
-    #############################
-    name_servers = FreeNAS_ActiveDirectory.get_domain_controllers(ad.ad_domainname, site=ad.ad_site)
-
-    # See if domain name is set inconsistently
-    if ad.ad_domainname != ngc.gc_domain:
+def validate_config(conf, alert_list):
+    if conf['ad']['ad_domainname'] != conf['gc']['gc_domain']:
         alert_list.append(
-            f'AD domain name {ad.ad_domainname} does not match global config domain {ngc.gc_domain}'
-        )
+            f'AD domain name {conf["ad"]["ad_domainname"]} does not match global conf domain {conf["gc"]["gc_domain"]}'
+        ) 
 
-    # See if we've set name servers that aren't for our domain
-    name_server_ips = []
-    for name_server in name_servers:
-       name_server_ips.append(socket.gethostbyname(str(name_server.target)))
+    for config_nameserver in conf['config_ns']:
+        if (config_nameserver) and (config_nameserver not in conf['ns_ips']):
+            alert_list.append(
+                f'{config_nameserver} is not a name server for AD domain {conf["ad"]["ad_domainname"]}'
+            )
 
-    for config_nameserver in config_nameservers:
-        if (config_nameserver) and (config_nameserver not in name_server_ips):
-            alert_list.append(f'{config_nameserver} is not a name server for AD domain {ad.ad_domainname}')
+    return alert_list
 
-    #############################
-    #  NTP CHECKS               #
-    #############################
 
-    ## Compare clock skew between system time and DC time ##
+def main():
+    alert_list = []
+    conf = get_config()
+    validate_config(conf, alert_list)
+
     ad_permitted_clockskew = datetime.timedelta(minutes=1)
-    for ad_domain_controller in name_servers:
+    for ad_domain_controller in conf['ns']:
        ad_permitted_clockskew = datetime.timedelta(minutes=1)
        ad_clockskew = validate_time(str(ad_domain_controller.target))
        if DEBUG:
@@ -183,20 +161,15 @@ def main():
        except:
            pass
 
-    #############################
-    # DNS  CHECKS               #
-    #############################
-
-    validate_ad_srv(alert_list, ad.ad_domainname, name_servers,  site=ad.ad_site, ssl=ad.ad_ssl)
-    validate_dns(alert_list, server_names, name_server_ips)
+    validate_ad_srv(alert_list, conf['ad']['ad_domainname'], conf['ns'],  site=conf['ad']['ad_site'], ssl=conf['ad']['ad_ssl'])
+    validate_dns(alert_list, conf['server_names'], conf['ns_ips'])
     if alert_list:
         for alert in alert_list:
             print(alert)
     else:
-        print("Everything works! Yay!")
+        print("Success")
+        return 0 
 
-    conf = get_config()
-    print(conf)
 
 if __name__ == '__main__':
     main()
