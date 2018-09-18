@@ -21,6 +21,30 @@ from freenasUI.common.freenasldap import FreeNAS_ActiveDirectory
 DEBUG = False
 DNS_TIMEOUT = 1
 
+def get_config():
+    conf = {}
+
+    conf['cifs'] = Client().call('datastore.query', 'services.cifs', None, {'get': True})
+    conf['ad'] = Client().call('datastore.query', 'directoryservice.activedirectory', None, {'get': True})
+    conf['gc'] = Client().call('datastore.query', 'network.globalconfiguration', None, {'get': True})
+    conf['ns'] = FreeNAS_ActiveDirectory.get_domain_controllers(conf['ad']['ad_domainname'], site=conf['ad']['ad_site']) 
+    conf['server_names'] = []
+    conf['config_ns'] = []
+    conf['config_ns'].append(conf['gc']['gc_nameserver1'])
+    conf['config_ns'].append(conf['gc']['gc_nameserver2'])
+    conf['config_ns'].append(conf['gc']['gc_nameserver3'])
+
+    conf['server_names'].append(conf['gc']['gc_hostname'] + "." + conf['ad']['ad_domainname'])
+    
+    if (conf['gc']['gc_hostname_b']) and (conf['gc']['gc_hostname_b'] != "truenas-b"):
+       conf['server_names'].append(conf['gc']['gc_hostname_b'] + "." + conf['ad']['ad_domainname'])
+    
+    if (conf['gc']['gc_hostname_virtual']):
+       conf['server_names'].append(conf['gc']['gc_hostname_virtual'] + "." + conf['ad']['ad_domainname'])
+
+    return conf 
+
+
 def validate_time(ntp_server):
     truenas_time = datetime.datetime.now()
     c = ntplib.NTPClient()
@@ -170,6 +194,9 @@ def main():
             print(alert)
     else:
         print("Everything works! Yay!")
+
+    conf = get_config()
+    print(conf)
 
 if __name__ == '__main__':
     main()
