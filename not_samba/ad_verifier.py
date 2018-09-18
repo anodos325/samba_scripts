@@ -18,6 +18,9 @@ if '/usr/local/www' not in sys.path:
 from freenasUI.common.freenassysctl import freenas_sysctl as _fs
 from freenasUI.common.freenasldap import FreeNAS_ActiveDirectory
 
+DEBUG = False
+DNS_TIMEOUT = 1
+
 def validate_time(ntp_server):
     truenas_time = datetime.datetime.now()
     c = ntplib.NTPClient()
@@ -28,10 +31,7 @@ def validate_time(ntp_server):
 
     ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
 
-    if ntp_time > truenas_time:
-        clockskew = ntp_time - truenas_time
-    else:
-        clockskew = truenas_time - ntp_time
+    clockskew = abs(ntp_time - truenas_time)
 
     return clockskew
 
@@ -70,14 +70,27 @@ def validate_dns(alert_list, server_names, name_server_ips):
       try:
           forward_lookup = my_resolver.query(server_name)
           server_address = str(forward_lookup.rrset).split()[4]
+          if DEBUG:
+              print(f'forward lookup for {server_name} successful')
+
       except:
           alert_list.append(f'address lookup for name {server_name} unsuccessful')
+          if DEBUG:
+              print(f'forward lookup for {server_name} unsuccessful')
 
     return alert_list
 
 def get_server_status(host, port, server_type, alert_list):
-    if not FreeNAS_ActiveDirectory.port_is_listening(host, port, timeout=1):
+    if not FreeNAS_ActiveDirectory.port_is_listening(host, port, timeout=DNS_TIMEOUT):
+       if DEBUG:
+           print(f'open socket to {server_type} Server {host} - Fail')
+
        alert_list.append(f'Failed to open socket to {server_type} Server {host}')
+
+    else:
+       if DEBUG:
+           print(f'open socket to {server_type} Server {host} - Success')
+
     return alert_list
 
 def main():
@@ -135,6 +148,9 @@ def main():
     for ad_domain_controller in name_servers:
        ad_permitted_clockskew = datetime.timedelta(minutes=1)
        ad_clockskew = validate_time(str(ad_domain_controller.target))
+       if DEBUG:
+           print(f'Clock skew from {ad_domain_controller.target} is {ad_clockskew}')
+
        try: 
            if ad_clockskew > ad_permitted_clockskew:
                alert_list.append(
