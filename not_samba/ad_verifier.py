@@ -17,7 +17,7 @@ if '/usr/local/www' not in sys.path:
 from freenasUI.common.freenassysctl import freenas_sysctl as _fs
 from freenasUI.common.freenasldap import FreeNAS_ActiveDirectory
 
-DEBUG = False
+DEBUG = False 
 DNS_TIMEOUT = 1
 
 def get_config():
@@ -131,12 +131,23 @@ def validate_config(conf, alert_list):
         alert_list.append(
             f'AD domain name {conf["ad"]["ad_domainname"]} does not match global conf domain {conf["gc"]["gc_domain"]}'
         ) 
+    if DEBUG:
+        print(f'AD domain name is {conf["ad"]["ad_domainname"]} global config domain is {conf["gc"]["gc_domain"]}')
 
     for config_nameserver in conf['config_ns']:
         if (config_nameserver) and (config_nameserver not in conf['ns_ips']):
             alert_list.append(
                 f'{config_nameserver} is not a name server for AD domain {conf["ad"]["ad_domainname"]}'
             )
+            if DEBUG:
+                print(
+                    f'{config_nameserver} is not a name server for AD domain {conf["ad"]["ad_domainname"]}'
+                )
+        elif config_nameserver:
+            if DEBUG:
+                print(
+                    f'{config_nameserver} is a name server for AD domain {conf["ad"]["ad_domainname"]}'
+                )
 
     return alert_list
 
