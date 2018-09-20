@@ -228,11 +228,21 @@ get_stat_info(struct smb_info *smb_info)
 int
 print_output(struct smb_info *smb_info, int flags)
 {
-	printf("Flags; %08X\n", flags);
+	int entry_id = 0;
+	int acl_cnt =0;
+	acl_entry_t acl_entry;
+	acl_flagset_t acl_flags;
+	acl_tag_t acl_tag;
+        acl_permset_t permset;
+	acl_entry_type_t entry_type;
+	uid_t uid;
+	gid_t gid;
+
 	xo_open_container("path");
 	xo_emit("{:Path/%s} ", smb_info->path);	
 	xo_emit("{:Realpath/%s} ", smb_info->real_path);	
 	xo_close_container("path");
+
 	xo_open_container("stat");
 	if (flags & FLAG_OUTPUT_NUMERIC) {
 		xo_emit("{:Owner/%d} ", smb_info->st.st_uid);
@@ -251,6 +261,7 @@ print_output(struct smb_info *smb_info, int flags)
 	xo_emit("{:ctime/%d} ", smb_info->st.st_ctim);
 	xo_emit("{:btime/%d} ", smb_info->st.st_birthtim);
 	xo_close_container("stat");
+
 	xo_open_container("dosmode");
 	xo_emit("{:Directory/%d} ", (smb_info->st.st_mode & S_IFDIR ? 1 : 0));
 	xo_emit("{:Archive/%d} ", (smb_info->st.st_flags & UF_ARCHIVE ? 1 : 0));
@@ -259,41 +270,86 @@ print_output(struct smb_info *smb_info, int flags)
 	xo_emit("{:System/%d} ", (smb_info->st.st_flags & UF_SYSTEM ? 1 : 0));
 	xo_close_container("dosmode");
 
+	xo_open_container("ACL");
+	entry_id = ACL_FIRST_ENTRY;
+	while (acl_get_entry(smb_info->dacl, entry_id, &acl_entry) > 0 ){
+		uid_t *uid = NULL;
+		gid_t *gid = NULL;
+		entry_id = ACL_NEXT_ENTRY;
+		acl_get_tag_type(acl_entry, &acl_tag);
+		acl_get_permset(acl_entry, &permset);
+		acl_get_flagset_np(acl_entry, &acl_flags);
+		acl_get_entry_type_np(acl_entry, &entry_type);
+		xo_open_container("ACL_ENTRY");
+
+		xo_open_container("ae_id");
+		if (acl_tag & ACL_USER_OBJ) {
+			xo_emit("{:acl_tag/%s} ", "ACL_USER_OBJ");
+			xo_emit("{:acl_qualifier/%s} ", "owner@");
+		}
+		else if(acl_tag & ACL_USER) {
+			xo_emit("{:acl_tag/%s} ", "ACL_USER");
+			uid = acl_get_qualifier(acl_entry);
+			if (flags & FLAG_OUTPUT_NUMERIC) {
+				xo_emit("{:acl_qualifier/%d} ", *uid);
+			}
+			else {
+				char *pwname = NULL;
+				pwname = getuname(*uid);
+				xo_emit("{:acl_qualifier/%s} ", pwname);
+			}
+		}
+		else if(acl_tag & ACL_GROUP_OBJ) {
+			xo_emit("{:acl_tag/%s} ", "ACL_GROUP_OBJ");
+			xo_emit("{:acl_qualifier/%s} ", "group@");
+		}
+                else if(acl_tag & ACL_GROUP) {
+                        xo_emit("{:acl_tag/%s} ", "ACL_GROUP");
+                        gid = acl_get_qualifier(acl_entry);
+                        if (flags & FLAG_OUTPUT_NUMERIC) {
+                                xo_emit("{:acl_qualifier/%d} ", *gid);
+                        }
+                        else {
+                                char *grname = NULL;
+                                grname = getgname(*gid);
+                                xo_emit("{:acl_qualifier/%s} ", grname);
+                        }
+                }
+
+		else if(acl_tag & ACL_EVERYONE) {
+			xo_emit("{:acl_tag/%s} ", "ACL_EVERYONE");
+			xo_emit("{:acl_qualifier/%s} ", "everyone@");
+		}
+		xo_close_container("ae_id");
+ 
+		xo_open_container("ae_perm");
+	 	xo_emit("{:r/%d} ", (*permset & ACL_READ_DATA ? 1 : 0));	
+	 	xo_emit("{:w/%d} ", (*permset & ACL_WRITE_DATA ? 1 : 0));	
+	 	xo_emit("{:x/%d} ", (*permset & ACL_EXECUTE ? 1 : 0));	
+	 	xo_emit("{:d/%d} ", (*permset & ACL_DELETE_CHILD ? 1 : 0));	
+	 	xo_emit("{:D/%d} ", (*permset & ACL_DELETE ? 1 : 0));	
+	 	xo_emit("{:a/%d} ", (*permset & ACL_READ_ATTRIBUTES ? 1 : 0));	
+	 	xo_emit("{:A/%d} ", (*permset & ACL_WRITE_ATTRIBUTES ? 1 : 0));	
+	 	xo_emit("{:R/%d} ", (*permset & ACL_READ_NAMED_ATTRS ? 1 : 0));	
+	 	xo_emit("{:W/%d} ", (*permset & ACL_WRITE_NAMED_ATTRS ? 1 : 0));	
+		xo_close_container("ae_perm");
+
+		xo_open_container("ae_flags");
+	 	xo_emit("{:f/%d} ", (*acl_flags & ACL_ENTRY_FILE_INHERIT ? 1 : 0));	
+	 	xo_emit("{:d/%d} ", (*acl_flags & ACL_ENTRY_DIRECTORY_INHERIT ? 1 : 0));	
+	 	xo_emit("{:i/%d} ", (*acl_flags & ACL_ENTRY_INHERIT_ONLY ? 1 : 0));	
+	 	xo_emit("{:n/%d} ", (*acl_flags & ACL_ENTRY_NO_PROPAGATE_INHERIT ? 1 : 0));	
+	 	xo_emit("{:I/%d} ", (*acl_flags & ACL_ENTRY_INHERITED ? 1 : 0));	
+		xo_close_container("ae_flags");
+
+	 	xo_emit("{:ae_entry_type/%s} ", (entry_type & ACL_ENTRY_TYPE_ALLOW ? "allow" : "deny"));	
+		
+		xo_close_container("ACL_ENTRY");
+		++acl_cnt;
+	}
+	xo_close_container("ACL");
 	xo_finish();
 
-/*
-	if ((flags & FLAG_OUTPUT_JSON) == 0) {
-		printf("Path: %s\n", smb_info->path);
-		printf("Realpath: %s\n", smb_info->real_path);
-		if (flags & FLAG_OUTPUT_NUMERIC) {	
-			printf("Owner: %d\n", smb_info->st.st_uid);
-			printf("Group: %d\n", smb_info->st.st_gid);
-		}
-		else {
-			char *pwname = NULL;
-			char *grname = NULL;
-			pwname = getuname(smb_info->st.st_uid);
-			grname = getgname(smb_info->st.st_gid);
-			printf("User: %s\n", pwname); 
-			printf("Group: %s\n", grname); 
-		}
-
-		printf("DOS Mode: ");
-		if (smb_info->st.st_mode & S_IFDIR) {
-			printf("D");
-		}
-		if (smb_info->st.st_flags & UF_ARCHIVE) {
-			printf("A");
-		}	
-		if (smb_info->st.st_flags & UF_HIDDEN) {
-			printf("H");
-		}
-		if (smb_info->st.st_flags & UF_READONLY) {
-			printf("R");
-		}
-		printf("\n\n");
-	}
-*/
 	return 0;
 }
 
@@ -303,7 +359,10 @@ main(int argc, char *argv[])
 	int ch, error, i, ret, flags;
 	struct smb_info *smb_info;
 	smb_info = new_smb_info();
+	int nentries;
 	char *real_path;
+	acl_t aclp;
+	char *acl_text;
 	char buf[PATH_MAX + 1];
 
 	flags = FLAG_OUTPUT_NONE;
@@ -365,6 +424,12 @@ main(int argc, char *argv[])
  			printf("Stat failed: %s\n", smb_info->path);
 			continue;
 		}	
+
+		ret = get_acl_type(smb_info);
+
+		if (ret == ACL_TYPE_NFS4) {
+			smb_info->dacl = acl_get_file(smb_info->path, ACL_TYPE_NFS4);
+		} 
 
 		ret = print_output(smb_info, flags);
 		if (ret < 0) {
