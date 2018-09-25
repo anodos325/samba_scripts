@@ -18,7 +18,7 @@
 #define SAMBA_XATTR_DOSSTREAM_PREFIX	"DosStream."
 
 #define FLAG_OUTPUT_NONE		0x00000000
-#define FLAG_OUTPUT_JSON		0x00000001
+#define FLAG_OUTPUT_RAW			0x00000001
 #define FLAG_OUTPUT_NUMERIC		0x00000004
 #define FLAG_OUTPUT_VERBOSE		0x00000008
 #define BASE_ACE_INDENT			40
@@ -27,7 +27,7 @@ static void
 usage(void)
 {
 
-        fprintf(stderr, "smbinfo [-nsv] [file ...]\n");
+        fprintf(stderr, "smbinfo [-nrv] [file ...]\n");
 }
 
 
@@ -259,7 +259,7 @@ print_output(struct smb_info *smb_info, int flags)
 		grname = getgname(smb_info->st.st_gid);
 		xo_emit("# {T:owner}: {:Owner/%s}\n# {T:group}: {:Group/%s}\n", pwname, grname);
 	}
-	xo_emit("{:atime/%d} {:mtime/%d} {:ctime/%d} {:btime/%d}]\n",
+	xo_emit("{:atime/%d} {:mtime/%d} {:ctime/%d} {:btime/%d}\n",
 		 smb_info->st.st_atim, smb_info->st.st_mtim,
 		 smb_info->st.st_ctim, smb_info->st.st_birthtim);
 	xo_close_container("stat");
@@ -318,9 +318,9 @@ print_output(struct smb_info *smb_info, int flags)
 			indent = BASE_ACE_INDENT - 6 + tag_indent;
 			xo_emit("{:acl_tag/%s}{[:/%d}{]:}{:acl_qualifier/%s}:", "ACL_GROUP_OBJ", indent, "group@");
 		}
-                else if(acl_tag & ACL_GROUP) {
-                        gid = acl_get_qualifier(acl_entry);
-                        if (flags & FLAG_OUTPUT_NUMERIC) {
+		else if(acl_tag & ACL_GROUP) {
+			gid = acl_get_qualifier(acl_entry);
+			if (flags & FLAG_OUTPUT_NUMERIC) {
 				tag_indent = 6;
 				char *tmpname[18];
 				(void)sprintf(tmpname, "%u", *gid);
@@ -384,6 +384,70 @@ print_output(struct smb_info *smb_info, int flags)
 	return 0;
 }
 
+int                             
+print_output_raw(struct smb_info *smb_info)
+{
+	int entry_id = 0;
+	int acl_cnt =0;
+	acl_entry_t acl_entry;
+	acl_flagset_t acl_flags;
+	acl_tag_t acl_tag;
+        acl_permset_t permset;
+	acl_entry_type_t entry_type;
+
+	xo_open_container("path");
+	xo_emit("# {T:file}: {:Path/%s}\n# {T:realpath}: {:Realpath/%s}\n",
+		 smb_info->path, smb_info->real_path);	
+	xo_close_container("path");
+
+	xo_open_container("stat");
+	xo_emit("# {T:owner}: {:Owner/%d}\n# {T:group}: {:Group/%d}\n", smb_info->st.st_uid, smb_info->st.st_gid);
+	xo_emit("{:atime/%d} {:mtime/%d} {:ctime/%d} {:btime/%d}\n",
+		 smb_info->st.st_atim, smb_info->st.st_mtim,
+		 smb_info->st.st_ctim, smb_info->st.st_birthtim);
+	xo_close_container("stat");
+	xo_open_container("dosmode");
+	xo_emit("{T:st_mode}:{:st_mode/0x%05x}\n", smb_info->st.st_mode);
+	xo_emit("{T:st_flags}:{:st_flags/0x%08x}\n", smb_info->st.st_flags);
+	xo_close_container("dosmode");
+
+	xo_open_list("acl");
+	entry_id = ACL_FIRST_ENTRY;
+	while (acl_get_entry(smb_info->dacl, entry_id, &acl_entry) > 0 ){
+		uid_t *uid = NULL;
+		gid_t *gid = NULL;
+		entry_id = ACL_NEXT_ENTRY;
+		acl_get_tag_type(acl_entry, &acl_tag);
+		acl_get_permset(acl_entry, &permset);
+		acl_get_flagset_np(acl_entry, &acl_flags);
+		acl_get_entry_type_np(acl_entry, &entry_type);
+		xo_open_instance("ACL_ENTRY");
+		xo_emit("{:ae_tag/0x%08x}:", acl_tag);
+
+		if(acl_tag & ACL_USER) {
+			uid = acl_get_qualifier(acl_entry);
+			xo_emit("{:tag_qualifier/%d}:", *uid);
+		}
+		else if(acl_tag & ACL_GROUP) {
+			gid = acl_get_qualifier(acl_entry);
+			xo_emit("{:tag_qualifier/%d}:", *gid);
+		}
+		else {
+			xo_emit("{:tag_qualifier/%d}:", 0);
+		}
+
+	 	xo_emit("{:ae_perm/0x%08x}:", *permset); 
+		xo_emit("{:ae_flags/0x%04x}:", *acl_flags);
+		xo_emit("{:ae_entry_type/0x%04x}\n", entry_type);
+
+	}
+ 
+	xo_close_list("acl");
+	xo_finish();
+
+	return 0;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -400,7 +464,7 @@ main(int argc, char *argv[])
 
 	/* 
 	 * n = display numeric ids
-	 * j = output in JSON
+	 * r = output in raw form 
 	 * v = verbose
 	 */
 	argc = xo_parse_args(argc, argv);
@@ -408,13 +472,13 @@ main(int argc, char *argv[])
         	exit(1);
 
 
-	while ((ch = getopt(argc, argv, "njv")) != -1)
+	while ((ch = getopt(argc, argv, "nrv")) != -1)
 	switch(ch) {
 	case 'n':
 		flags |= FLAG_OUTPUT_NUMERIC;
 		break;
-	case 'j':
-		flags |= FLAG_OUTPUT_JSON;
+	case 'r':
+		flags |= FLAG_OUTPUT_RAW;
 		break;
 	case 'v':
 		flags |= FLAG_OUTPUT_NUMERIC; 
@@ -459,8 +523,12 @@ main(int argc, char *argv[])
 		if (ret == ACL_TYPE_NFS4) {
 			smb_info->dacl = acl_get_file(smb_info->path, ACL_TYPE_NFS4);
 		} 
-
-		ret = print_output(smb_info, flags);
+		if (flags & FLAG_OUTPUT_RAW) { 
+			ret = print_output_raw(smb_info);
+		}
+		else {
+			ret = print_output(smb_info, flags);
+		}
 		if (ret < 0) {
 			printf("Failed to print output: %s\n", smb_info->path);
 		}
