@@ -408,7 +408,7 @@ print_output_raw(struct smb_info *smb_info)
 	xo_close_container("stat");
 	xo_open_container("dosmode");
 	xo_emit("{T:st_mode}:{:st_mode/0x%05x}\n", smb_info->st.st_mode);
-	xo_emit("{T:st_flags}:{:st_flags/0x%08x}\n", smb_info->st.st_flags);
+	xo_emit("{T:st_flags}:{:st_flags/0x%03x}\n", smb_info->st.st_flags);
 	xo_close_container("dosmode");
 
 	xo_open_list("acl");
