@@ -1,0 +1,12 @@
+#!/usr/sbin/dtrace -s
+::fsync:entry /execname=="smbd"/
+{
+        self->e_ts = timestamp;
+}
+
+:::fsync:return /execname=="smbd"/
+{
+@["delta(ns)",probefunc] = quantize(timestamp - self->e_ts);
+        printf("%Y", walltimestamp);
+        self->e_ts = 0;
+}
