@@ -1,0 +1,14 @@
+#!/usr/sbin/dtrace -qs
+
+syscall::extattr_get_file:entry
+/execname=="smbd"/
+{
+        self->filename = copyinstr (arg0);
+        self->xattr = copyinstr (arg2);
+}
+
+syscall::extattr_get_file:return
+/execname=="smbd"/
+{
+	printf("path: %s, xattr: %s, return: %d bytes\n", self->filename, self->xattr, arg0);
+}
