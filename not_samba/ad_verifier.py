@@ -1,226 +1,301 @@
-#!/usr/local/bin/python
-
+import argparse
+import datetime
+import enum
+import json
+import ldap
+import ldap.sasl
+import ntplib
 import os
-import pwd
-import re
 import sys
+import ssl
+
+import pwd
 import socket
 import subprocess
-import tempfile
-import time
-import logging
-import logging.config
-import ntplib
-import datetime
-import sqlite3
-import dns.resolver
-import textwrap
 
-if '/usr/local/www' not in sys.path:
-    sys.path.append('/usr/local/www')
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'freenasUI.settings')
+from dns import resolver
+from middlewared.client import Client
+from multiprocessing import Pool, TimeoutError
 
-import django
-from django.apps import apps
-if not apps.ready:
-    django.setup()
 
-from freenasUI.common.freenassysctl import freenas_sysctl as _fs
-from freenasUI.common.freenasldap import FreeNAS_ActiveDirectory
+class SRV(enum.Enum):
+    DOMAINCONTROLLER = '_ldap._tcp.dc._msdcs.'
+    FORESTGLOBALCATALOG = '_ldap._tcp.gc._msdcs.'
+    GLOBALCATALOG = '_gc._tcp.'
+    KERBEROS = '_kerberos._tcp.'
+    KERBEROSDOMAINCONTROLLER = '_kerberos._tcp.dc._msdcs.'
+    KPASSWD = '_kpasswd._tcp.'
+    LDAP = '_ldap._tcp.'
+    PDC = '_ldap._tcp.pdc._msdcs.'
+            
 
-def validate_time(ntp_server):
-    # to do: should use UTC instead of local time. On other hand,
-    # this is not a big con for a manual smoke-test.
+class SSL(enum.Enum):
+    NOSSL = 'OFF'
+    USESSL = 'ON'
+    USESTARTTLS = 'START_TLS'
 
-    truenas_time = datetime.datetime.now()
+
+class ActiveDirectory_DNS(object):
+    def __init__(self, **kwargs):
+        super(ActiveDirectory_DNS, self).__init__()
+        self.ad = kwargs.get('conf')
+        return
+
+    def _get_SRV_records(self, host, dns_timeout):
+        """
+        Set resolver timeout to 1/3 of the lifetime. The timeout defines
+        how long to wait before moving on to the next nameserver in resolv.conf
+        """
+        srv_records = []
+        
+        if not host:
+            return srv_records
+
+        r = resolver.Resolver()
+        r.lifetime = dns_timeout
+        r.timeout = r.lifetime / 3
+        
+        try:
+
+            answers = r.query(host, 'SRV')
+            srv_records = sorted(
+                answers,
+                key=lambda a: (int(a.priority), int(a.weight))
+            )
+
+        except Exception:
+            srv_records = []
+
+        return srv_records
+
+    def port_is_listening(self, host, port, timeout=1):
+        ret = False
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if timeout:
+            s.settimeout(timeout)
+
+        try:
+            s.connect((host, port))
+            ret = True
+
+        except Exception as e:
+            raise CallError(e)
+
+        finally:
+            s.close()
+
+        return ret
+
+    def _get_servers(self, srv_prefix):
+        """
+        We will first try fo find servers based on our AD site. If we don't find
+        a server in our site, then we populate list for whole domain. Ticket #27584
+        Domain Controllers, Forest Global Catalog Servers, and Kerberos Domain Controllers
+        need the site information placed before the 'msdcs' component of the host entry.t
+        """
+        servers = []
+        if not self.ad['domainname']:
+            return servers
+
+        if self.ad['site'] and self.ad['site'] != 'Default-First-Site-Name':
+            if 'msdcs' in srv_prefix.value:
+                parts = srv_prefix.value.split('.')
+                srv = '.'.join([parts[0], parts[1]])
+                msdcs = '.'.join([parts[2], parts[3]])
+                host = f"{srv}.{self.ad['site']}._sites.{msdcs}.{self.ad['domainname']}"
+            else:
+                host = f"{srv_prefix.value}{self.ad['site']}._sites.{self.ad['domainname']}"
+        else:
+            host = f"{srv_prefix.value}{self.ad['domainname']}"
+
+        servers = self._get_SRV_records(host, self.ad['dns_timeout'])
+
+        if not servers and self.ad['site']:
+            host = f"{srv_prefix.value}{self.ad['domainname']}"
+            servers = self._get_SRV_records(host, self.ad['dns_timeout'])
+
+        if SSL(self.ad['ssl'].upper()) == SSL.USESSL:
+            for server in servers:
+                if server.port == 389:
+                    server.port = 636
+
+        return {'srv': str(srv_prefix.name), 'servers': servers}
+
+    def get_n_working_servers(self, srv=SRV['DOMAINCONTROLLER'], number=1):
+        """
+        :get_n_working_servers: often only a few working servers are needed and not the whole
+        list available on the domain. This takes the SRV record type and number of servers to get
+        as arguments.
+        """
+        res = self._get_servers(srv)
+        found_servers = []
+        for server in res['servers']:
+            if len(found_servers) == number:
+                break
+
+            host = server.target.to_text(True)
+            port = int(server.port)
+            if self.port_is_listening(host, port, timeout=1):
+                server_info = {'host': host, 'port': port}
+                found_servers.append(server_info)
+
+        return {
+            'type': srv.name.lower(),
+            'server_list': found_servers,
+            'status': 'PASS' if found_servers else 'FAIL'
+        }
+
+def parse_args():
+    global args
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '-j', '--json',
+        help='output results in JSON format',
+        action='store_true')
+    parser.add_argument(
+        '-t', '--time',
+        help='check clockskew from PDC emulator.',
+        action='store_true')
+    parser.add_argument(
+        '-o', '--online',
+        help='verfiy AD components are reachable.',
+        action='store_true')
+    parser.add_argument(
+        '-d', '--dump',
+        help='list all connectable servers in the domain.',
+        action='store_true')
+    parser.add_argument(
+        '-r', '--records',
+        help='output SRV records for domain.',
+        action='store_true')
+    parser.add_argument(
+        '-s', '--ssl',
+        help='check whether LDAPs is used in the domain.',
+        action='store_true')
+    args = parser.parse_args(sys.argv[1:])
+
+def check_clockskew(ad):
+    pdc = ActiveDirectory_DNS(conf=ad).get_n_working_servers(SRV.PDC, 1)
+    if not pdc:
+        return {'pdc': '<unknown>', 'timestamp': '<unknown>', 'clockskew': '<unknown>', 'status': 'FAULTED'}
+
+    permitted_clockskew = datetime.timedelta(minutes=3) 
+    nas_time = datetime.datetime.now()
     c = ntplib.NTPClient()
-    try:
-        response = c.request(ntp_server)
-    except:
-        return "error querying ntp_server"
-
+    response = c.request(pdc['server_list'][0]['host'])
     ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
+    clockskew = abs(ntp_time - nas_time)
+    return {
+        'pdc': str(pdc['server_list'][0]['host']),
+        'timestamp': str(ntp_time),
+        'clockskew': str(clockskew),
+        'status': 'PASS' if clockskew < permitted_clockskew else 'FAIL'
+    }
 
-    # I'm only concerned about clockskew and not who is to blame.
-    if ntp_time > truenas_time:
-        clockskew = ntp_time - truenas_time
-    else:
-        clockskew = truenas_time - ntp_time
+def check_servers_exist(ad, pool, number=1):
+    """
+    give 60 second timeout on checking if server is up
+    """
+    server_data = {}
+    results = [pool.apply_async( ActiveDirectory_DNS(conf=ad).get_n_working_servers, (s, number)) for s in SRV]
+    for res in results:
+        try:
+            entry = res.get(timeout=60)
+            server_data[entry['type']] = {
+                'server_list': entry['server_list'],
+                'status':  entry['status']
+            }
+        except TimeoutError:
+            pass
 
-    return clockskew
+    for s in SRV:
+        if not server_data.get(s.name.lower()):
+            server_data[s] = ['<unknown>']
+    return server_data
 
+def get_srv_records(ad, pool):
+    srv_records = {} 
+    results = [pool.apply_async( ActiveDirectory_DNS(conf=ad)._get_servers, (s,)) for s in SRV]
+    for res in results:
+        try:
+            ret = res.get(timeout=60)
+            srv = ret.get('srv').lower()
+            srv_records[srv] = []
+            for server in ret['servers']:
+                srv_records[srv].append(
+                   {'host': server.target.to_text(True), 'port': int(server.port)}
+                )
+           
+        except TimeoutError:
+            pass
+    return srv_records 
 
-def get_server_status(host, port, server_type):
-    if FreeNAS_ActiveDirectory.port_is_listening(host, port):
-       print("DEBUG: open socket to %s Server %s reports - SUCCESS" % (server_type, host))
-    else:
-       print("DEBUG: open socket to %s Server %s reports - FAIL" % (server_type, host))
+def check_supports_ssl(ad):
+    """
+    This may fail with ECONNRESET or something different depending on firewall rules.
+    For now just assume an exception means failure.
+    """
+    ldap = ActiveDirectory_DNS(conf=ad).get_n_working_servers(SRV.LDAP, 1)
+    try:
+        server_cert = ssl.get_server_certificate((ldap['server_list'][0]['host'], 636))
+        ret =  {
+            'server': str(ldap['server_list'][0]['host']),
+            'cert': str(server_cert),
+            'status': 'PASS' if server_cert else 'FAIL'
+        }
+    except Exception:
+        ret = {
+            'server': str(ldap['server_list'][0]['host']),
+            'cert': '',
+            'status': 'FAIL'
+        } 
 
+    return ret
+
+def outputtotext(output):
+    for k,v in output.items():
+        print(f'\n{k}')
+        print('-------------------------')
+        if k == 'ssl':
+            print(f'{v["server"]} -- {v["status"]}')
+        elif k in ['server_data', 'connectable_servers']:
+            for s, srvdata in v.items():
+               print(f'-{s.upper()}-')
+               for i in srvdata['server_list']:
+                   print(f'{v[s]["status"]} -- {i["host"]}:{i["port"]}') 
+        else:
+            print(v)
+    
 def main():
-    #####################################
-    # Grab information from Config File #
-    #####################################
-    server_names = []
-    bind_ips = []
-    FREENAS_DB = '/data/freenas-v1.db'
-    conn = sqlite3.connect(FREENAS_DB)
-    conn.row_factory = lambda cursor, row: row[0]
-    c = conn.cursor()
+    parse_args()
+    permitted_clockskew = datetime.timedelta(minutes=3) 
+    ad = Client().call(
+        'datastore.query',
+        'directoryservice.activedirectory',
+        [],
+        {'get': True, 'prefix': 'ad_'}
+    )
+    output = {} 
+    with Pool(processes=8) as pool:
+        if args.online:
+           output['server_data'] = check_servers_exist(ad, pool)
+        if args.dump:
+           output['connectable_servers'] = check_servers_exist(ad, pool, -1)
+        if args.records:
+           output['srv_records'] = get_srv_records(ad, pool)
 
-    # Get NTP Servers
-    c.execute('SELECT ntp_address FROM system_ntpserver')
-    config_ntp_servers = c.fetchall()
+    if args.time:
+        output['time'] = check_clockskew(ad)
 
-    # Get IP Addresses for NICs
-    c.execute('SELECT int_ipv4address FROM network_interfaces')
-    config_ipv4_addresses = c.fetchall()
+    if args.ssl:
+        output['ssl'] = check_supports_ssl(ad)
 
-    c.execute('SELECT cifs_srv_bindip FROM services_cifs')
-    cifs_srv_bind_ip = c.fetchone()
-
-    if (cifs_srv_bind_ip):
-       bind_ips = str(cifs_srv_bind_ip).split(",")
+    if args.json:
+        print(json.dumps(output, sort_keys=True, indent=2))
     else:
-       bind_ips = config_ipv4_addresses
-    
-    # Get AD domain name
-    c.execute('SELECT ad_domainname FROM directoryservice_activedirectory')
-    ad_domainname = c.fetchone()
-
-    # Get Global Configuration Domain Network
-    c.execute('SELECT gc_domain FROM network_globalconfiguration')
-    gc_domain = c.fetchone()
-
-    c.execute('SELECT gc_hostname FROM network_globalconfiguration')
-    gc_hostname = c.fetchone()
-
-    c.execute('SELECT gc_hostname_b FROM network_globalconfiguration')
-    gc_hostname_b = c.fetchone()
-
-    c.execute('SELECT gc_hostname_virtual FROM network_globalconfiguration')
-    gc_hostname_virtual = c.fetchone()
-    
-    server_names.append(gc_hostname + "." + ad_domainname)
-
-    if (gc_hostname_b) and (gc_hostname_b != "truenas-b"):
-       server_names.append(gc_hostname_b + "." + ad_domainname)
-
-    if (gc_hostname_virtual):
-       server_names.append(gc_hostname_virtual + "." + ad_domainname)
-
-    # Get config DNS servers
-    c.execute('SELECT gc_nameserver1 FROM network_globalconfiguration')
-    config_nameserver1 = c.fetchone()
-    c.execute('SELECT gc_nameserver2 FROM network_globalconfiguration')
-    config_nameserver2 = c.fetchone()
-    c.execute('SELECT gc_nameserver3 FROM network_globalconfiguration')
-    config_nameserver3 = c.fetchone()
-    conn.close()
-
-    #####################################
-    # DNS query all the things          #
-    #####################################
-    ad_domain_controllers = FreeNAS_ActiveDirectory.get_domain_controllers(ad_domainname)
-    kerberos_domain_controllers = FreeNAS_ActiveDirectory.get_kerberos_domain_controllers(ad_domainname)
-    name_servers = ad_domain_controllers 
-    ldap_servers = FreeNAS_ActiveDirectory.get_ldap_servers(ad_domainname) 
-    kpasswd_servers = FreeNAS_ActiveDirectory.get_kpasswd_servers(ad_domainname)
-    global_catalog_servers = FreeNAS_ActiveDirectory.get_global_catalog_servers(ad_domainname)
-    kerberos_servers = FreeNAS_ActiveDirectory.get_kerberos_servers(ad_domainname)
-
-    #############################
-    # CONFIG SANITY CHECKS      #
-    #############################
-
-    # See if domain name is set inconsistently
-    if ad_domainname != gc_domain:
-        print("WARNING: AD domain name %s does not match global configuration domain %s" % (ad_domainname, gc_domain))
-
-    # See if we've set name servers that aren't for our domain
-    name_server_ips = []
-    for name_server in name_servers:
-       name_server_ips.append(socket.gethostbyname(str(name_server.target)))
-
-    if (config_nameserver1) and (config_nameserver1 not in name_server_ips):
-       print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver1,ad_domainname))
-
-    if (config_nameserver2) and (config_nameserver2 not in name_server_ips):
-       print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver2,ad_domainname))
-
-    if (config_nameserver3) and (config_nameserver3 not in name_server_ips):
-       print("WARNING: name server %s is not a name server for AD domain %s" % (config_nameserver3,ad_domainname))
-
-
-    #############################
-    #  NTP CHECKS               #
-    #############################
-
-    ## Compare clockskew between system time and config ntp server time ##
-    config_permitted_clockskew = datetime.timedelta(minutes=1)
-    print("DEBUG: determining clock skew between NAS and configured NTP servers")
-    for ntp_server in config_ntp_servers:
-       config_clockskew = validate_time(ntp_server)
-       print("CONFIG_NTP_SERVERS: %s clockskew is: %s" % (ntp_server,config_clockskew))
-       try: 
-           if config_clockskew > config_permitted_clockskew:
-               print("   WARNING: clockskew between configured NTP server and system time is greater than 1 minute")
-       except:
-           pass
-
-    ## Compare clock skew between system time and DC time ##
-    ad_permitted_clockskew = datetime.timedelta(minutes=1)
-    for ad_domain_controller in ad_domain_controllers:
-       ad_clockskew = validate_time(str(ad_domain_controller.target))
-       print("AD_NTP_SERVERS: %s clockskew is: %s" % (ad_domain_controller.target,ad_clockskew))
-       try: 
-           if ad_clockskew > ad_permitted_clockskew:
-               print("   WARNING: clock skew between AD DC and system time is greater than 1 minute")
-       except:
-           pass
-
-
-    #############################
-    # DNS  CHECKS               #
-    #############################
-
-    # Verify that we can open sockets to the various AD components
-    for server in name_servers:
-       get_server_status(str(server.target), 53, "Name")
-
-    for server in ad_domain_controllers:
-       get_server_status(str(server.target), server.port, "AD/DC")
-
-    for server in ldap_servers:
-       get_server_status(str(server.target), server.port, "LDAPS")
-
-    for server in kerberos_servers:
-       get_server_status(str(server.target), server.port, "Kerberos")
-
-    for server in kerberos_domain_controllers:
-       get_server_status(str(server.target), server.port, "KDC")
-
-    for server in global_catalog_servers:
-       get_server_status(str(server.target), server.port, "Global Catalog")
-
-    print("DEBUG: Verifying server entries in IPv4 forward lookup zone")
-    my_resolver = dns.resolver.Resolver()
-    my_resolver.nameservers = name_server_ips 
-    for server_name in server_names: 
-      try:
-          forward_lookup = my_resolver.query(server_name)
-          server_address = str(forward_lookup.rrset).split()[4]
-          print("   SUCCESS - %s resolved to %s" % (server_name, server_address)) 
-      except:
-          print("   FAIL - address lookup for name %s unsuccessful" % (server_name))
-
-    print("DEBUG: Verifying server entries in IPv4 reverse lookup zone")
-    for address in bind_ips:
-       try:
-          host_name = socket.gethostbyaddr(address)
-          print("   SUCCESS - %s resolved to %s" % (address, host_name[0]))
-       except:
-          print("   FAIL - hostname lookup for address %s unsuccessful" % (address))
-
+        outputtotext(output)
 
 if __name__ == '__main__':
     main()
